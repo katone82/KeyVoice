@@ -4,7 +4,7 @@ import struct
 from collections import deque
 import threading
 
-ACCESS_KEY = "e4SeAww2IHVfL9jzYWFTqNLFz9nzaSsdxq4vd3GSsrsLdxYAM3gaOw=="
+ACCESS_KEY = ""
 KEYWORDS = ["jarvis"]
 SENSITIVITY = 0.7
 PRE_BUFFER_SECONDS = 0.5
