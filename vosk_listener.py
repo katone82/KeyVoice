@@ -7,32 +7,36 @@ import json
 import re
 import threading
 
-VOSK_MODEL_PATH = "/home/homeassistant/vosk-model/model/vosk-model-small-it-0.22"
-DOMOTICA_JSON = "/home/katone/porcupine/threadsafe/coda2/domotica.json"  # JSON con azioni e entità
 
-# Caricamento dizionario domotica
-try:
-    with open(DOMOTICA_JSON, "r", encoding="utf-8") as f:
-        domotica_data = json.load(f)
-        ACTIONS = domotica_data.get("azioni", [])
-        ENTITIES = domotica_data.get("entita", [])
-        ROOMS = domotica_data.get("stanze", [])
-except Exception as e:
-    print(f"[VOLK] ERRORE caricamento JSON domotica: {e}")
-    ACTIONS = []
-    ENTITIES = []
-    ROOMS = []
+def load_domotica(domotica_path: str):
+    """Carica azioni, entità e stanze dal JSON di configurazione."""
+    try:
+        with open(domotica_path, "r", encoding="utf-8") as f:
+            domotica_data = json.load(f)
+            return (
+                domotica_data.get("azioni", []),
+                domotica_data.get("entita", []),
+                domotica_data.get("stanze", []),
+            )
+    except Exception as e:
+        print(f"[VOLK] ERRORE caricamento JSON domotica: {e}")
+        return [], [], []
 
-def filter_domotica(text: str):
+
+def filter_domotica(text: str, actions, entities, rooms):
     """Filtra azioni, entità e stanze da una stringa."""
     text_lower = text.lower()
-    found_actions = [a for a in ACTIONS if re.search(rf"\b{re.escape(a)}\b", text_lower)]
-    found_entities = [e for e in ENTITIES if re.search(rf"\b{re.escape(e)}\b", text_lower)]
-    found_rooms = [r for r in ROOMS if re.search(rf"\b{re.escape(r)}\b", text_lower)]
+    found_actions = [a for a in actions if re.search(rf"\b{re.escape(a)}\b", text_lower)]
+    found_entities = [e for e in entities if re.search(rf"\b{re.escape(e)}\b", text_lower)]
+    found_rooms = [r for r in rooms if re.search(rf"\b{re.escape(r)}\b", text_lower)]
     return found_actions, found_entities, found_rooms
 
-def vosk_listener(audio_queue: Queue, stop_event: threading.Event, model_path=VOSK_MODEL_PATH, ready_event=None):
+
+def vosk_listener(audio_queue: Queue, stop_event: threading.Event, config: dict, ready_event=None):
     """Thread Vosk che trascrive l’audio dalla coda e filtra comandi domotici."""
+    model_path = config["model_path"]
+    domotica_json = config["domotica_json"]
+
     print("[VOLK] Thread partito")
     print(f"[VOLK] Caricamento modello da: {model_path}")
 
@@ -45,6 +49,9 @@ def vosk_listener(audio_queue: Queue, stop_event: threading.Event, model_path=VO
         print(f"[VOLK] ERRORE caricamento modello: {e}")
         return
 
+    # Carico dizionario domotica
+    ACTIONS, ENTITIES, ROOMS = load_domotica(domotica_json)
+
     while not stop_event.is_set():
         try:
             audio_buffer, sample_rate = audio_queue.get(timeout=1)
@@ -54,7 +61,6 @@ def vosk_listener(audio_queue: Queue, stop_event: threading.Event, model_path=VO
         if not audio_buffer or len(audio_buffer) == 0:
             continue
 
-        # Nuovo recognizer per ogni registrazione (evita accumulo)
         rec = vosk.KaldiRecognizer(model, 16000)
 
         # Conversione in numpy int16
@@ -85,12 +91,12 @@ def vosk_listener(audio_queue: Queue, stop_event: threading.Event, model_path=VO
             if rec.AcceptWaveform(pcm_bytes):
                 result_json = rec.Result()
                 text = json.loads(result_json).get("text", "")
-                actions, entities, rooms = filter_domotica(text)
+                actions, entities, rooms = filter_domotica(text, ACTIONS, ENTITIES, ROOMS)
                 print(f"[VOLK] Comando domotico rilevato -> JSON: {json.dumps({'text': text, 'azioni': actions, 'entita': entities, 'stanze': rooms}, ensure_ascii=False)}")
             else:
                 partial_json = rec.PartialResult()
                 partial_text = json.loads(partial_json).get("partial", "")
-                actions, entities, rooms = filter_domotica(partial_text)
+                actions, entities, rooms = filter_domotica(partial_text, ACTIONS, ENTITIES, ROOMS)
                 print(f"[VOLK] Comando parziale -> JSON: {json.dumps({'text': partial_text, 'azioni': actions, 'entita': entities, 'stanze': rooms}, ensure_ascii=False)}")
         except Exception as e:
             print(f"[VOLK] ERRORE riconoscimento: {e}")

@@ -4,21 +4,14 @@ import struct
 from collections import deque
 import threading
 
-ACCESS_KEY = "e4SeAww2IHVfL9jzYWFTqNLFz9nzaSsdxq4vd3GSsrsLdxYAM3gaOw=="
-KEYWORDS = ["jarvis"]
-SENSITIVITY = 0.7
-PRE_BUFFER_SECONDS = 0.5
-WAKEWORD_TRIM_MS = 300
-SILENCE_THRESHOLD = 500
-SILENCE_DURATION = 2
-
-def porcupine_listener(audio_queue, stop_event: threading.Event):
+def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
     print("[PORCUPINE] Thread partito")
+
     try:
         porcupine = pvporcupine.create(
-            access_key=ACCESS_KEY,
-            keywords=KEYWORDS,
-            sensitivities=[SENSITIVITY]
+            access_key=config["access_key"],
+            keywords=config["keywords"],
+            sensitivities=[config["sensitivity"]]
         )
         pa = pyaudio.PyAudio()
         stream = pa.open(
@@ -33,7 +26,7 @@ def porcupine_listener(audio_queue, stop_event: threading.Event):
         print(f"[PORCUPINE] Errore inizializzazione: {e}")
         return
 
-    pre_buffer = deque(maxlen=int(PRE_BUFFER_SECONDS * porcupine.sample_rate))
+    pre_buffer = deque(maxlen=int(config["pre_buffer_seconds"] * porcupine.sample_rate))
     audio_buffer = []
     recording = False
     silence_counter = 0
@@ -49,29 +42,29 @@ def porcupine_listener(audio_queue, stop_event: threading.Event):
             if porcupine.process(pcm_unpacked) >= 0 and not recording:
                 print("[LISTENER] Wake word rilevata!")
                 recording = True
-                samples_to_trim = int((WAKEWORD_TRIM_MS / 1000) * porcupine.sample_rate)
+                samples_to_trim = int((config["wakeword_trim_ms"] / 1000) * porcupine.sample_rate)
                 pre_buffer_list = list(pre_buffer)
                 pre_buffer_list = pre_buffer_list[samples_to_trim:] if samples_to_trim < len(pre_buffer_list) else []
                 audio_buffer.extend(pre_buffer_list)
 
             if recording:
                 audio_buffer.extend(pcm_unpacked)
-                if max(pcm_unpacked) < SILENCE_THRESHOLD:
+                if max(pcm_unpacked) < config["silence_threshold"]:
                     silence_counter += frame_duration
                 else:
                     silence_counter = 0
 
-                if silence_counter >= SILENCE_DURATION:
+                if silence_counter >= config["silence_duration"]:
                     print("[LISTENER] Fine registrazione, pausa rilevata")
-                    # INVIO BUFFER ALLA CODA: copia indipendente
-                    buffer_to_send = audio_buffer[:]  # nuova lista indipendente
+                    buffer_to_send = audio_buffer[:]  # copia indipendente
                     audio_queue.put((buffer_to_send, porcupine.sample_rate))
                     print("[VOLK] Nuova registrazione: buffer inviato e azzerato")
-                    # RESET COMPLETO DEL BUFFER
-                    audio_buffer = []  # nuova lista vuota
+
+                    # RESET COMPLETO
+                    audio_buffer = []
                     recording = False
                     silence_counter = 0
-                    pre_buffer.clear()  # reset pre-buffer
+                    pre_buffer.clear()
     finally:
         stop_event.set()
         stream.stop_stream()
