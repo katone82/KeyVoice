@@ -1,5 +1,7 @@
 # mywakeword
 
+pip install -r requirements.txt
+
 
 {
   "porcupine": {

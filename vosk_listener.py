@@ -4,38 +4,14 @@ import numpy as np
 from scipy.signal import resample
 from queue import Queue
 import json
-import re
 import threading
 
-
-def load_domotica(domotica_path: str):
-    """Carica azioni, entità e stanze dal JSON di configurazione."""
-    try:
-        with open(domotica_path, "r", encoding="utf-8") as f:
-            domotica_data = json.load(f)
-            return (
-                domotica_data.get("azioni", []),
-                domotica_data.get("entita", []),
-                domotica_data.get("stanze", []),
-            )
-    except Exception as e:
-        print(f"[VOLK] ERRORE caricamento JSON domotica: {e}")
-        return [], [], []
-
-
-def filter_domotica(text: str, actions, entities, rooms):
-    """Filtra azioni, entità e stanze da una stringa."""
-    text_lower = text.lower()
-    found_actions = [a for a in actions if re.search(rf"\b{re.escape(a)}\b", text_lower)]
-    found_entities = [e for e in entities if re.search(rf"\b{re.escape(e)}\b", text_lower)]
-    found_rooms = [r for r in rooms if re.search(rf"\b{re.escape(r)}\b", text_lower)]
-    return found_actions, found_entities, found_rooms
-
-
-def vosk_listener(audio_queue: Queue, stop_event: threading.Event, config: dict, ready_event=None):
-    """Thread Vosk che trascrive l’audio dalla coda e filtra comandi domotici."""
+def vosk_listener(audio_queue: Queue, stop_event: threading.Event, config: dict, command_queue: Queue = None, ready_event=None):
+    """
+    Thread Vosk: trascrive l’audio dalla coda e invia la frase semplice al fuzzy parser.
+    Non fa alcun check sul comando, solo trascrizione.
+    """
     model_path = config["model_path"]
-    domotica_json = config["domotica_json"]
 
     print("[VOLK] Thread partito")
     print(f"[VOLK] Caricamento modello da: {model_path}")
@@ -49,21 +25,16 @@ def vosk_listener(audio_queue: Queue, stop_event: threading.Event, config: dict,
         print(f"[VOLK] ERRORE caricamento modello: {e}")
         return
 
-    # Carico dizionario domotica
-    ACTIONS, ENTITIES, ROOMS = load_domotica(domotica_json)
-
     while not stop_event.is_set():
         try:
             audio_buffer, sample_rate = audio_queue.get(timeout=1)
         except Exception:
-            continue  # niente audio disponibile
+            continue
 
-        if not audio_buffer or len(audio_buffer) == 0:
+        if not audio_buffer:
             continue
 
         rec = vosk.KaldiRecognizer(model, 16000)
-
-        # Conversione in numpy int16
         audio_array = np.array(audio_buffer, dtype=np.int16)
 
         # Resample a 16 kHz se necessario
@@ -87,16 +58,19 @@ def vosk_listener(audio_queue: Queue, stop_event: threading.Event, config: dict,
 
         # Elaborazione Vosk
         try:
-            print("[VOLK] Presa in carico buffer audio per analisi...")
             if rec.AcceptWaveform(pcm_bytes):
                 result_json = rec.Result()
                 text = json.loads(result_json).get("text", "")
-                actions, entities, rooms = filter_domotica(text, ACTIONS, ENTITIES, ROOMS)
-                print(f"[VOLK] Comando domotico rilevato -> JSON: {json.dumps({'text': text, 'azioni': actions, 'entita': entities, 'stanze': rooms}, ensure_ascii=False)}")
+                if text.strip():
+                    print(f"[VOLK] Comando finale trascritto: {text}")
+                    if command_queue:
+                        command_queue.put(text)
             else:
                 partial_json = rec.PartialResult()
                 partial_text = json.loads(partial_json).get("partial", "")
-                actions, entities, rooms = filter_domotica(partial_text, ACTIONS, ENTITIES, ROOMS)
-                print(f"[VOLK] Comando parziale -> JSON: {json.dumps({'text': partial_text, 'azioni': actions, 'entita': entities, 'stanze': rooms}, ensure_ascii=False)}")
+                if partial_text.strip():
+                    print(f"[VOLK] Comando parziale trascritto: {partial_text}")
+                    if command_queue:
+                        command_queue.put(partial_text)
         except Exception as e:
             print(f"[VOLK] ERRORE riconoscimento: {e}")

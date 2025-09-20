@@ -1,0 +1,11 @@
+{
+  "accendi": ["accendi", "accendere", "accendete", "accendiamo", "accenderei", "accendendo"],
+  "spegni": ["spegni", "spegnere", "spegnete", "spegniamo", "spegnerò", "spegneresti", "spegnendo"],
+  "alza": ["alza", "alzare", "alzate", "alziamo", "alzerò", "alzeresti", "alzando"],
+  "abbassa": ["abbassa", "abbassare", "abbassate", "abbassiamo", "abbasserò", "abbasseresti", "abbassando"],
+  "apri": ["apri", "aprire", "aprite", "apriamo", "aprirò", "aprirai", "aprendo"],
+  "chiudi": ["chiudi", "chiudere", "chiudete", "chiudiamo", "chiuderò", "chiuderai", "chiudendo"],
+  "attiva": ["attiva", "attivare", "attivate", "attiviamo", "attiverò", "attiverai", "attivando"],
+  "disattiva": ["disattiva", "disattivare", "disattivate", "disattiviamo", "disattiverò", "disattiverai", "disattivando"]
+}
+
