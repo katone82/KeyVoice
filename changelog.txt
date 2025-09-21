@@ -1,0 +1,4 @@
+Il match delle entità ora è multi-word robusto e preferisce più parole corrispondenti.
+domotica.json viene creato e popolato automaticamente se mancante o vuoto.
+Logging chiaro sul caricamento dei dati e sul mapping friendly_name -> entity_id.
+Stanza opzionale mantenuta, ma viene matchata solo come informazione extra.

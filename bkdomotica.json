@@ -1,5 +1,0 @@
-{
-  "azioni": ["accendi", "spegni", "apri", "chiudi", "inserisci", "disinserisci", "riproduce", "metti", "avvia", "ferma", "attiva", "disattiva", "accedi"],
-  "entita": ["luce", "cancello", "allarme", "musica", "televisore", "porta", "tapparella", "lavatrice"],
-  "stanze": ["camera sveva", "camera emma", "salotto", "camera mapa", "bagno uomini", "bagno donne", "corridoio", "giardino"]
-}
