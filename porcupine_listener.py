@@ -5,6 +5,21 @@ from collections import deque
 import threading
 
 def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
+    import wave
+    import os
+    import time
+
+    def save_debug_audio(buffer, sample_rate):
+        debug_dir = "debug_audio"
+        os.makedirs(debug_dir, exist_ok=True)
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        wav_path = os.path.join(debug_dir, f"command_{timestamp}.wav")
+        with wave.open(wav_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)  # 16-bit audio
+            wf.setframerate(sample_rate)
+            wf.writeframes(struct.pack("<" + "h"*len(buffer), *buffer))
+        print(f"[DEBUG] Audio comando salvato: {wav_path}")
     """
     Thread Porcupine che cattura audio dal microfono e lo invia
     alla coda per la trascrizione da Vosk.
@@ -13,6 +28,8 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
     KEYWORDS = config["keywords"]
     SENSITIVITY = config.get("sensitivity", 0.7)
     PRE_BUFFER_SECONDS = config.get("pre_buffer_seconds", 0.5)
+    SAVE_DEBUG_AUDIO = config.get("save_debug_audio", False)
+    POST_BUFFER_SECONDS = config.get("post_buffer_seconds", 0.3)  # New: add trailing audio after silence
     WAKEWORD_TRIM_MS = config.get("wakeword_trim_ms", 300)
     SILENCE_THRESHOLD = config.get("silence_threshold", 500)
     SILENCE_DURATION = config.get("silence_duration", 2)
@@ -45,6 +62,9 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
     frame_duration = porcupine.frame_length / porcupine.sample_rate
 
     try:
+        post_buffer = []
+        post_buffer_frames = int(POST_BUFFER_SECONDS * porcupine.sample_rate)
+        post_buffer_count = 0
         while not stop_event.is_set():
             pcm = stream.read(porcupine.frame_length, exception_on_overflow=False)
             pcm_unpacked = struct.unpack_from("h" * porcupine.frame_length, pcm)
@@ -68,10 +88,22 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
 
                 if silence_counter >= SILENCE_DURATION:
                     print("[LISTENER] Fine registrazione, pausa rilevata")
+                    post_buffer = []
+                    post_buffer_count = 0
+                    # Start collecting post-silence frames
+                    while post_buffer_count < post_buffer_frames and not stop_event.is_set():
+                        pcm_post = stream.read(porcupine.frame_length, exception_on_overflow=False)
+                        pcm_post_unpacked = struct.unpack_from("h" * porcupine.frame_length, pcm_post)
+                        post_buffer.extend(pcm_post_unpacked)
+                        post_buffer_count += porcupine.frame_length
+                    audio_buffer.extend(post_buffer)
                     # INVIO BUFFER ALLA CODA: copia indipendente
                     buffer_to_send = audio_buffer[:]
                     audio_queue.put((buffer_to_send, porcupine.sample_rate))
                     print("[VOLK] Nuova registrazione: buffer inviato e azzerato")
+                    # Salva audio solo se richiesto
+                    if SAVE_DEBUG_AUDIO:
+                        save_debug_audio(buffer_to_send, porcupine.sample_rate)
                     # RESET COMPLETO DEL BUFFER
                     audio_buffer = []
                     recording = False
