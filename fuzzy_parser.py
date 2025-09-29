@@ -2,6 +2,9 @@ import os
 import json
 import queue
 import threading
+ha_command_queue = queue.Queue()
+import unicodedata
+import re
 from rapidfuzz import process
 import requests
 
@@ -122,37 +125,56 @@ def normalize_action(azione_rilevata: str) -> str:
 # Parsing fuzzy multi-word intelligente
 # =======================
 def fuzzy_parse(frase: str):
-    frase_words = frase.lower().split()
+    # Normalize: lowercase, remove accents, remove punctuation
+    def normalize(text):
+        text = text.lower()
+        text = ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
+        text = re.sub(r'[^\w\s]', '', text)
+        return text.strip()
+
+    frase_norm = normalize(frase)
+    frase_words = frase_norm.split()
 
     # Azione
-    azione_match = process.extractOne(" ".join(frase_words), AZIONI)
+    azione_match = process.extractOne(frase_norm, AZIONI)
     azione = normalize_action(azione_match[0]) if azione_match and azione_match[1] > 70 else None
 
-    # Entità: match multi-word robusto
-    best_score = 0
+    # Entità: try full phrase first, then n-gram
     entita_finale = None
-    for ent in ENTITA:
-        ent_words = ent.split()
-        max_score = 0
-        for i in range(len(frase_words) - len(ent_words) + 1):
-            ngram = " ".join(frase_words[i:i+len(ent_words)])
-            score = process.extractOne(ngram, [ent])[1]
-            if score > max_score:
-                max_score = score
-        if max_score > best_score or (max_score == best_score and entita_finale and len(ent_words) > len(entita_finale.split())):
-            best_score = max_score
-            entita_finale = ent
+    best_score = 0
+    # Try full phrase match
+    ent_full = process.extractOne(frase_norm, ENTITA)
+    if ent_full and ent_full[1] > 95:
+        entita_finale = ent_full[0]
+        best_score = ent_full[1]
+    else:
+        # Fallback: n-gram search
+        for ent in ENTITA:
+            ent_words = ent.split()
+            max_score = 0
+            for i in range(len(frase_words) - len(ent_words) + 1):
+                ngram = " ".join(frase_words[i:i+len(ent_words)])
+                score = process.extractOne(ngram, [ent])[1]
+                if score > max_score:
+                    max_score = score
+            if max_score > best_score or (max_score == best_score and entita_finale and len(ent_words) > len(entita_finale.split())):
+                best_score = max_score
+                entita_finale = ent
+        if best_score < 95:
+            entita_finale = None
 
     entity_id = MAPPING.get(entita_finale) if entita_finale else None
 
-    # Stanza (facoltativa)
+    # Stanza (facoltativa, stricter)
     best_score_stanza = 0
     stanza_finale = None
     for st in STANZE:
-        score = process.extractOne(" ".join(frase_words), [st])[1]
+        score = process.extractOne(frase_norm, [st])[1]
         if score > best_score_stanza:
             best_score_stanza = score
             stanza_finale = st
+    if best_score_stanza < 80:
+        stanza_finale = None
 
     return azione, entita_finale, stanza_finale, entity_id
 
@@ -160,6 +182,8 @@ def fuzzy_parse(frase: str):
 # Thread per processare comandi
 # =======================
 def processa_comandi():
+    import sys
+    PROFILE = getattr(sys, 'profile', None) or 'default'
     while not stop_event.is_set():
         try:
             frase = command_queue.get(timeout=1)
@@ -167,7 +191,7 @@ def processa_comandi():
             continue
 
         azione, entita, stanza, entity_id = fuzzy_parse(frase)
-        if azione and entita:
+        if azione and entita and entity_id:
             result = {
                 "azione": azione,
                 "entita": entita,
@@ -175,5 +199,22 @@ def processa_comandi():
                 "entity_id": entity_id
             }
             print(f"[COMANDI] Eseguo: {result}")
+            if PROFILE != 'test':
+                ha_command_queue.put(result)
+            else:
+                print("[COMANDI] DEBUG: comando NON inviato a Home Assistant (profilo test)")
         else:
-            print(f"[COMANDI] Comando non chiaro: {frase}")
+            print(f"[COMANDI] Comando non chiaro o entità non trovata: {frase}")
+
+# =======================
+# Thread per inviare comandi a Home Assistant
+# =======================
+def ha_command_consumer():
+    while not stop_event.is_set():
+        try:
+            cmd = ha_command_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+        # Qui va la logica per inviare il comando a Home Assistant
+        print(f"[HA] Invio comando a Home Assistant: {cmd}")
+        # TODO: implementa la chiamata HTTP o altro metodo
