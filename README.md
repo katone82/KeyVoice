@@ -83,8 +83,27 @@ Prima dell’installazione, crea o modifica `config.json` nella root del progett
 Clona il repository e installa le dipendenze:
 
 ```bash
+sudo apt update
+sudo apt install libportaudio2 libportaudiocpp0 portaudio19-dev
+
+sudo apt update
+sudo apt install python3-pip python3-venv python3-dev libasound2-dev portaudio19-dev
+
+sudo apt update
+sudo apt install python3.10 python3.10-venv python3.10-dev
+
+
+
 git clone https://github.com/katone82/KeyVoice.git
 cd KeyVoice
+python3 -m venv keyvoiceenv
+source keyvoiceenv/bin/activate
+pip install --upgrade pip
+
+pip uninstall pvporcupine
+pip install pvporcupine==2.1.0  # The latest version often includes more ARM CPUs
+
+
 pip install -r requirements.txt
 ```
 
