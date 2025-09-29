@@ -5,11 +5,11 @@ pvporcupine==2.2.0
 PyAudio==0.2.13
 
 # Librerie per Vosk ASR
-vosk==0.3.62
+vosk==0.3.45
 numpy==1.25.2
-scipy==1.12.1
+scipy==1.11.3
 
 # Libreria per fuzzy matching
-rapidfuzz==3.2.2
+rapidfuzz==3.14.1
 
 # Librerie standard di utilità
