@@ -3,6 +3,7 @@ import pyaudio
 import struct
 from collections import deque
 import threading
+import sys
 
 def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
     import wave
@@ -73,6 +74,7 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
             # Wake word rilevata
             if porcupine.process(pcm_unpacked) >= 0 and not recording:
                 print("[LISTENER] Wake word rilevata!")
+                play_beep()
                 recording = True
                 samples_to_trim = int((WAKEWORD_TRIM_MS / 1000) * porcupine.sample_rate)
                 pre_buffer_list = list(pre_buffer)
@@ -116,3 +118,12 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
         pa.terminate()
         porcupine.delete()
         print("[PORCUPINE] Listener terminato")
+
+if sys.platform == 'win32':
+    import winsound
+    def play_beep():
+        winsound.Beep(1000, 200)
+else:
+    import os
+    def play_beep():
+        os.system('play -nq -t alsa synth 0.2 sine 1000')
