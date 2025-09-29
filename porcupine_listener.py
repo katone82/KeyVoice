@@ -119,11 +119,19 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
         porcupine.delete()
         print("[PORCUPINE] Listener terminato")
 
-if sys.platform == 'win32':
-    import winsound
+import numpy as np
+try:
+    import simpleaudio as sa
     def play_beep():
-        winsound.Beep(1000, 200)
-else:
-    import os
+        # Generate a 1000 Hz sine wave for 200 ms
+        frequency = 1000  # Hz
+        duration = 0.2  # seconds
+        sample_rate = 44100
+        t = np.linspace(0, duration, int(sample_rate * duration), False)
+        tone = np.sin(frequency * 2 * np.pi * t)
+        audio = (tone * 32767).astype(np.int16)
+        play_obj = sa.play_buffer(audio, 1, 2, sample_rate)
+        play_obj.wait_done()
+except ImportError:
     def play_beep():
-        os.system('play -nq -t alsa synth 0.2 sine 1000')
+        print("[WARN] simpleaudio non installato: beep non disponibile.")

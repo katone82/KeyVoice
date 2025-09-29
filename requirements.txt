@@ -13,3 +13,6 @@ scipy==1.11.3
 rapidfuzz==3.14.1
 
 # Librerie standard di utilità
+
+# Libreria per beep cross-platform
+simpleaudio
