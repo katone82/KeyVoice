@@ -9,6 +9,13 @@ import sys
 import webrtcvad
 
 def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
+    # Funzione per svuotare la coda audio
+    def clear_audio_queue(q):
+        try:
+            while True:
+                q.get_nowait()
+        except Exception:
+            pass
     # Timeout massimo per iniziare a parlare dopo la wake word (in secondi)
     VAD_VOICE_START_TIMEOUT = config.get('vad_voice_start_timeout', 1.5)  # Timeout in secondi per iniziare a parlare dopo la wake word
     import wave
@@ -87,14 +94,21 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
             # Wake word rilevata
             if porcupine.process(pcm_unpacked) >= 0 and not recording:
                 print("[LISTENER] Wake word rilevata!")
-                play_beep()
+                # AZZERA TUTTO per sicurezza
+                audio_buffer.clear()
+                vad_buffer.clear()
+                pre_buffer.clear()
+                post_buffer = []
+                post_buffer_count = 0
+                voice_inactive_frames = 0
+                # Svuota la coda audio per evitare vecchi comandi
+                clear_audio_queue(audio_queue)
                 recording = True
+                play_beep()
                 samples_to_trim = int((WAKEWORD_TRIM_MS / 1000) * porcupine.sample_rate)
                 pre_buffer_list = list(pre_buffer)
                 pre_buffer_list = pre_buffer_list[samples_to_trim:] if samples_to_trim < len(pre_buffer_list) else []
                 audio_buffer.extend(pre_buffer_list)
-                voice_inactive_frames = 0
-                vad_buffer = []
                 # Timeout per inizio voce dopo wake word
                 voice_detected = False
                 start_time = time.time()
