@@ -141,6 +141,22 @@ python src/keyvoice.py
 
 ---
 
+### 7.1 Installazione del servizio
+
+```bash
+python create_services.py
+
+#Scrivo file di servizio in: /etc/systemd/system/keyvoice.service
+#File keyvoice.service creato. Copialo con sudo in /etc/systemd/system e abilita con:
+
+sudo cp keyvoice.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable keyvoice
+sudo systemctl start keyvoice
+
+```
+
+
 ## 8. Riconoscimento vocale
 
 Dopo il rilevamento del wake word, KeyVoice utilizza **Vosk** per trascrivere l’audio in testo.
