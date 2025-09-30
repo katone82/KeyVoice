@@ -164,7 +164,7 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
                     audio_buffer = []
                     recording = False
                     voice_inactive_frames = 0
-                    vad_buffer = []
+                    vad_buffer = []  # Pulisci sempre il buffer VAD
                     pre_buffer.clear()
     finally:
         stop_event.set()
