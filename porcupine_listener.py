@@ -68,6 +68,10 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
     vad.set_mode(config.get('vad_mode', 2))  # 0-3, 3 = most aggressive
     voice_inactive_frames = 0
     max_voice_inactive_frames = int(config.get('vad_voice_end_sec', 0.5) / frame_duration)
+    # Per VAD: accumula campioni per frame da 30ms (480 campioni a 16kHz)
+    vad_frame_ms = 30
+    vad_frame_length = int((vad_frame_ms / 1000) * porcupine.sample_rate)
+    vad_buffer = []
 
     try:
         post_buffer = []
@@ -91,15 +95,22 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
 
             if recording:
                 audio_buffer.extend(pcm_unpacked)
-                # VAD expects 16-bit mono PCM, 20ms/30ms/10ms frames
-                # Porcupine frame is usually 512 samples at 16kHz = 32ms
-                # We'll use 30ms chunks for VAD
-                vad_bytes = struct.pack('<' + 'h'*len(pcm_unpacked), *pcm_unpacked)
-                is_speech = vad.is_speech(vad_bytes, porcupine.sample_rate)
-                if is_speech:
-                    voice_inactive_frames = 0
-                else:
-                    voice_inactive_frames += 1
+                # Accumula campioni per frame VAD da 30ms
+                vad_buffer.extend(pcm_unpacked)
+                while len(vad_buffer) >= vad_frame_length:
+                    vad_frame = vad_buffer[:vad_frame_length]
+                    vad_bytes = struct.pack('<' + 'h'*vad_frame_length, *vad_frame)
+                    try:
+                        is_speech = vad.is_speech(vad_bytes, porcupine.sample_rate)
+                    except Exception as e:
+                        print(f"[VAD] Errore: {e}")
+                        is_speech = True  # fallback: non fermare la registrazione
+                    if is_speech:
+                        voice_inactive_frames = 0
+                    else:
+                        voice_inactive_frames += 1
+                    # Rimuovi il frame appena processato
+                    vad_buffer = vad_buffer[vad_frame_length:]
 
                 if voice_inactive_frames >= max_voice_inactive_frames:
                     print("[LISTENER] Fine registrazione, voce terminata (VAD)")
@@ -123,6 +134,7 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
                     audio_buffer = []
                     recording = False
                     voice_inactive_frames = 0
+                    vad_buffer = []
                     pre_buffer.clear()
     finally:
         stop_event.set()
