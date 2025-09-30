@@ -1,5 +1,5 @@
 # Libreria per il wake word (Porcupine)
-pvporcupine==2.2.0
+#pvporcupine==2.2.0
 
 # Libreria per acquisizione audio
 PyAudio==0.2.13

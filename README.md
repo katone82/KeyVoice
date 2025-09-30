@@ -102,7 +102,7 @@ pip install --upgrade pip
 
 pip uninstall pvporcupine
 pip install pvporcupine==2.1.0  # The latest version often includes more ARM CPUs
-
+pip install --upgrade pvporcupine
 
 pip install -r requirements.txt
 ```
