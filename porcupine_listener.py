@@ -153,13 +153,18 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
                         post_buffer.extend(pcm_post_unpacked)
                         post_buffer_count += porcupine.frame_length
                     audio_buffer.extend(post_buffer)
-                    # INVIO BUFFER ALLA CODA: copia indipendente
-                    buffer_to_send = audio_buffer[:]
-                    audio_queue.put((buffer_to_send, porcupine.sample_rate))
-                    print("[VOLK] Nuova registrazione: buffer inviato e azzerato")
-                    # Salva audio solo se richiesto
-                    if SAVE_DEBUG_AUDIO:
-                        save_debug_audio(buffer_to_send, porcupine.sample_rate)
+                    # Se il buffer contiene solo silenzio (nessuna voce rilevata), non inviare a Vosk
+                    min_voice_samples = int(0.2 * porcupine.sample_rate)  # almeno 0.2s di voce
+                    if len(audio_buffer) < min_voice_samples:
+                        print("[LISTENER] Nessuna voce rilevata dopo la wake word. Ignoro e riparto.")
+                    else:
+                        # INVIO BUFFER ALLA CODA: copia indipendente
+                        buffer_to_send = audio_buffer[:]
+                        audio_queue.put((buffer_to_send, porcupine.sample_rate))
+                        print("[VOLK] Nuova registrazione: buffer inviato e azzerato")
+                        # Salva audio solo se richiesto
+                        if SAVE_DEBUG_AUDIO:
+                            save_debug_audio(buffer_to_send, porcupine.sample_rate)
                     # RESET COMPLETO DEL BUFFER
                     audio_buffer = []
                     recording = False
