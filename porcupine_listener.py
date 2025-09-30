@@ -74,7 +74,7 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
     recording = False
     frame_duration = porcupine.frame_length / porcupine.sample_rate
     vad = webrtcvad.Vad()
-    vad.set_mode(config.get('vad_mode', 2))  # 0-3, 3 = most aggressive
+    vad.set_mode(3)  # 0-3, 3 = most aggressive
     voice_inactive_frames = 0
     max_voice_inactive_frames = int(config.get('vad_voice_end_sec', 0.5) / frame_duration)
     # Per VAD: accumula campioni per frame da 30ms (480 campioni a 16kHz)
@@ -168,7 +168,8 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
                         post_buffer_count += porcupine.frame_length
                     audio_buffer.extend(post_buffer)
                     # Se il buffer contiene solo silenzio (nessuna voce rilevata), non inviare a Vosk
-                    min_voice_samples = int(0.2 * porcupine.sample_rate)  # almeno 0.2s di voce
+                    min_voice_samples = int(0.5 * porcupine.sample_rate)  # almeno 0.5s di voce
+                    print(f"[DEBUG] Lunghezza buffer audio da inviare a Vosk: {len(audio_buffer)} campioni ({len(audio_buffer)/porcupine.sample_rate:.2f} s)")
                     if len(audio_buffer) < min_voice_samples:
                         print("[LISTENER] Nessuna voce rilevata dopo la wake word. Ignoro e riparto.")
                         audio_buffer.clear()
