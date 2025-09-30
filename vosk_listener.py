@@ -26,7 +26,6 @@ def vosk_listener(audio_queue: Queue, stop_event: threading.Event, config: dict,
         print(f"[VOLK] ERRORE caricamento modello: {e}")
         return
 
-    rec = vosk.KaldiRecognizer(model, 16000)
     while not stop_event.is_set():
         try:
             audio_buffer, sample_rate = audio_queue.get(timeout=1)
@@ -57,7 +56,8 @@ def vosk_listener(audio_queue: Queue, stop_event: threading.Event, config: dict,
             print(f"[VOLK] ERRORE packing audio: {e}")
             continue
 
-        # Elaborazione Vosk
+        # Crea un recognizer nuovo per ogni buffer
+        rec = vosk.KaldiRecognizer(model, 16000)
         try:
             start_time = time.time()
             if rec.AcceptWaveform(pcm_bytes):

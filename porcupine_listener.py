@@ -42,7 +42,7 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
     SENSITIVITY = config.get("sensitivity", 0.7)
     PRE_BUFFER_SECONDS = config.get("pre_buffer_seconds", 0.5)
     SAVE_DEBUG_AUDIO = config.get("save_debug_audio", False)
-    POST_BUFFER_SECONDS = config.get("post_buffer_seconds", 0.3)  # New: add trailing audio after silence
+    POST_BUFFER_SECONDS = config.get("post_buffer_seconds", 0.1)  # Ridotto: meno coda dopo la voce
     WAKEWORD_TRIM_MS = config.get("wakeword_trim_ms", 300)
     SILENCE_THRESHOLD = config.get("silence_threshold", 500)
     SILENCE_DURATION = config.get("silence_duration", 2)
@@ -76,7 +76,7 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
     vad = webrtcvad.Vad()
     vad.set_mode(3)  # 0-3, 3 = most aggressive
     voice_inactive_frames = 0
-    max_voice_inactive_frames = int(config.get('vad_voice_end_sec', 0.5) / frame_duration)
+    max_voice_inactive_frames = int(config.get('vad_voice_end_sec', 0.2) / frame_duration)  # più rapido
     # Per VAD: accumula campioni per frame da 30ms (480 campioni a 16kHz)
     vad_frame_ms = 30
     vad_frame_length = int((vad_frame_ms / 1000) * porcupine.sample_rate)
@@ -169,7 +169,7 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
                     audio_buffer.extend(post_buffer)
                     # Se il buffer contiene solo silenzio (nessuna voce rilevata), non inviare a Vosk
                     min_voice_samples = int(0.5 * porcupine.sample_rate)  # almeno 0.5s di voce
-                    print(f"[DEBUG] Lunghezza buffer audio da inviare a Vosk: {len(audio_buffer)} campioni ({len(audio_buffer)/porcupine.sample_rate:.2f} s)")
+                    print(f"[DEBUG] Lunghezza buffer audio da inviare a Vosk: {len(audio_buffer)} campioni ({len(audio_buffer)/porcupine.sample_rate:.2f} s) | VAD end frames: {max_voice_inactive_frames}")
                     if len(audio_buffer) < min_voice_samples:
                         print("[LISTENER] Nessuna voce rilevata dopo la wake word. Ignoro e riparto.")
                         audio_buffer.clear()
