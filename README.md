@@ -136,7 +136,7 @@ KeyVoice/
 Avvia KeyVoice con:
 
 ```bash
-python src/keyvoice.py
+python3 src/keyvoice.py
 ```
 
 ---
@@ -144,7 +144,7 @@ python src/keyvoice.py
 ### 7.1 Installazione del servizio
 
 ```bash
-python create_services.py
+python3 create_services.py
 
 #Scrivo file di servizio in: /etc/systemd/system/keyvoice.service
 #File keyvoice.service creato. Copialo con sudo in /etc/systemd/system e abilita con:
@@ -155,7 +155,11 @@ sudo systemctl enable keyvoice
 sudo systemctl start keyvoice
 
 ```
+per leggere i log adesso occorre accedere a journalctl
 
+```bash
+sudo journalctl -u keyvoice -f
+```
 
 ## 8. Riconoscimento vocale
 
