@@ -182,6 +182,8 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
                         if SAVE_DEBUG_AUDIO:
                             save_debug_audio(buffer_to_send, porcupine.sample_rate)
                         audio_buffer.clear()
+                        # Svuota la coda audio dopo ogni invio
+                        clear_audio_queue(audio_queue)
                     # RESET COMPLETO DEL BUFFER
                     recording = False
                     voice_inactive_frames = 0
