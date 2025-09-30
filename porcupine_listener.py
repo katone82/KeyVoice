@@ -9,6 +9,8 @@ import sys
 import webrtcvad
 
 def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
+    # Timeout massimo per iniziare a parlare dopo la wake word (in secondi)
+    VAD_VOICE_START_TIMEOUT = config.get('vad_voice_start_timeout', 1.5)  # Timeout in secondi per iniziare a parlare dopo la wake word
     import wave
     import os
     import time
@@ -92,6 +94,34 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
                 pre_buffer_list = pre_buffer_list[samples_to_trim:] if samples_to_trim < len(pre_buffer_list) else []
                 audio_buffer.extend(pre_buffer_list)
                 voice_inactive_frames = 0
+                vad_buffer = []
+                # Timeout per inizio voce dopo wake word
+                voice_detected = False
+                start_time = time.time()
+                while not voice_detected and (time.time() - start_time) < VAD_VOICE_START_TIMEOUT and not stop_event.is_set():
+                    pcm_wait = stream.read(porcupine.frame_length, exception_on_overflow=False)
+                    pcm_wait_unpacked = struct.unpack_from('h' * porcupine.frame_length, pcm_wait)
+                    audio_buffer.extend(pcm_wait_unpacked)
+                    vad_buffer.extend(pcm_wait_unpacked)
+                    while len(vad_buffer) >= vad_frame_length:
+                        vad_frame = vad_buffer[:vad_frame_length]
+                        vad_bytes = struct.pack('<' + 'h'*vad_frame_length, *vad_frame)
+                        try:
+                            is_speech = vad.is_speech(vad_bytes, porcupine.sample_rate)
+                        except Exception as e:
+                            print(f"[VAD] Errore: {e}")
+                            is_speech = True
+                        if is_speech:
+                            voice_detected = True
+                            break
+                        vad_buffer = vad_buffer[vad_frame_length:]
+                if not voice_detected:
+                    print(f"[LISTENER] Nessuna voce rilevata entro {VAD_VOICE_START_TIMEOUT}s dopo la wake word. Annulla registrazione.")
+                    audio_buffer = []
+                    recording = False
+                    vad_buffer = []
+                    pre_buffer.clear()
+                    continue
 
             if recording:
                 audio_buffer.extend(pcm_unpacked)
