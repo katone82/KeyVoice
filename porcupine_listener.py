@@ -117,9 +117,9 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
                         vad_buffer = vad_buffer[vad_frame_length:]
                 if not voice_detected:
                     print(f"[LISTENER] Nessuna voce rilevata entro {VAD_VOICE_START_TIMEOUT}s dopo la wake word. Annulla registrazione.")
-                    audio_buffer = []
+                    audio_buffer.clear()
                     recording = False
-                    vad_buffer = []
+                    vad_buffer.clear()
                     pre_buffer.clear()
                     continue
 
@@ -157,19 +157,20 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
                     min_voice_samples = int(0.2 * porcupine.sample_rate)  # almeno 0.2s di voce
                     if len(audio_buffer) < min_voice_samples:
                         print("[LISTENER] Nessuna voce rilevata dopo la wake word. Ignoro e riparto.")
+                        audio_buffer.clear()
                     else:
                         # INVIO BUFFER ALLA CODA: copia indipendente
-                        buffer_to_send = audio_buffer[:]
+                        buffer_to_send = list(audio_buffer)
                         audio_queue.put((buffer_to_send, porcupine.sample_rate))
                         print("[VOLK] Nuova registrazione: buffer inviato e azzerato")
                         # Salva audio solo se richiesto
                         if SAVE_DEBUG_AUDIO:
                             save_debug_audio(buffer_to_send, porcupine.sample_rate)
+                        audio_buffer.clear()
                     # RESET COMPLETO DEL BUFFER
-                    audio_buffer = []
                     recording = False
                     voice_inactive_frames = 0
-                    vad_buffer = []  # Pulisci sempre il buffer VAD
+                    vad_buffer.clear()  # Pulisci sempre il buffer VAD
                     pre_buffer.clear()
     finally:
         stop_event.set()
