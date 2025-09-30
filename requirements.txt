@@ -16,3 +16,6 @@ rapidfuzz==3.14.1
 
 # Libreria per beep cross-platform
 simpleaudio
+
+# Voice Activity Detection
+webrtcvad

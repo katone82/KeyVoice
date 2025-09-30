@@ -5,6 +5,9 @@ from collections import deque
 import threading
 import sys
 
+# Voice Activity Detection
+import webrtcvad
+
 def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
     import wave
     import os
@@ -58,9 +61,13 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
 
     pre_buffer = deque(maxlen=int(PRE_BUFFER_SECONDS * porcupine.sample_rate))
     audio_buffer = []
+
     recording = False
-    silence_counter = 0
     frame_duration = porcupine.frame_length / porcupine.sample_rate
+    vad = webrtcvad.Vad()
+    vad.set_mode(config.get('vad_mode', 2))  # 0-3, 3 = most aggressive
+    voice_inactive_frames = 0
+    max_voice_inactive_frames = int(config.get('vad_voice_end_sec', 0.5) / frame_duration)
 
     try:
         post_buffer = []
@@ -80,16 +87,22 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
                 pre_buffer_list = list(pre_buffer)
                 pre_buffer_list = pre_buffer_list[samples_to_trim:] if samples_to_trim < len(pre_buffer_list) else []
                 audio_buffer.extend(pre_buffer_list)
+                voice_inactive_frames = 0
 
             if recording:
                 audio_buffer.extend(pcm_unpacked)
-                if max(pcm_unpacked) < SILENCE_THRESHOLD:
-                    silence_counter += frame_duration
+                # VAD expects 16-bit mono PCM, 20ms/30ms/10ms frames
+                # Porcupine frame is usually 512 samples at 16kHz = 32ms
+                # We'll use 30ms chunks for VAD
+                vad_bytes = struct.pack('<' + 'h'*len(pcm_unpacked), *pcm_unpacked)
+                is_speech = vad.is_speech(vad_bytes, porcupine.sample_rate)
+                if is_speech:
+                    voice_inactive_frames = 0
                 else:
-                    silence_counter = 0
+                    voice_inactive_frames += 1
 
-                if silence_counter >= SILENCE_DURATION:
-                    print("[LISTENER] Fine registrazione, pausa rilevata")
+                if voice_inactive_frames >= max_voice_inactive_frames:
+                    print("[LISTENER] Fine registrazione, voce terminata (VAD)")
                     post_buffer = []
                     post_buffer_count = 0
                     # Start collecting post-silence frames
@@ -109,7 +122,7 @@ def porcupine_listener(audio_queue, stop_event: threading.Event, config: dict):
                     # RESET COMPLETO DEL BUFFER
                     audio_buffer = []
                     recording = False
-                    silence_counter = 0
+                    voice_inactive_frames = 0
                     pre_buffer.clear()
     finally:
         stop_event.set()
