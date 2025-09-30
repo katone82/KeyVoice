@@ -4,6 +4,7 @@ import queue
 import time
 import requests
 import os
+import sys
 
 from vosk_listener import vosk_listener
 from porcupine_listener import porcupine_listener
@@ -14,6 +15,8 @@ from fuzzy_parser import init_fuzzy, processa_comandi, command_queue, stop_event
 # ==============================
 with open("config.json", "r", encoding="utf-8") as f:
     CONFIG = json.load(f)
+
+sys.profile = CONFIG['profile']
 
 # ==============================
 # Coda audio e segnali di pronto
