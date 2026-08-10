@@ -13,7 +13,7 @@ from fuzzy_parser import init_fuzzy, processa_comandi, command_queue, stop_event
 # ==============================
 # CARICA CONFIGURAZIONE ESTERNA
 # ==============================
-with open("config.json", "r", encoding="utf-8") as f:
+with open("config/config.json", "r", encoding="utf-8") as f:
     CONFIG = json.load(f)
 
 sys.profile = CONFIG['profile']
