@@ -96,8 +96,12 @@ sudo apt install python3.10 python3.10-venv python3.10-dev
 
 git clone https://github.com/katone82/KeyVoice.git
 cd KeyVoice
-python3 -m venv keyvoiceenv
-source keyvoiceenv/bin/activate
+#python3 -m venv keyvoiceenv
+#source keyvoiceenv/bin/activate
+prepara direttamente il virtualenv senza venv e source i due comandi sopra commentati
+/bin/sh activate.sh
+
+
 pip install --upgrade pip
 
 pip uninstall pvporcupine
