@@ -6,8 +6,6 @@ config/*
 # Python cache
 __pycache__/*.py[cod]
 
-# Debug audio
-debug_audio/*.wav
 
 # Virtual environment
 keyvoiceenv/
@@ -21,3 +19,4 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+/debug_audio/
