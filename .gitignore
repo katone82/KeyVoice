@@ -3,3 +3,21 @@ keyvoiceenv/*
 testporcupine.py
 /.idea/*
 config/*
+# Python cache
+__pycache__/*.py[cod]
+
+# Debug audio
+debug_audio/*.wav
+
+# Virtual environment
+keyvoiceenv/
+venv/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
