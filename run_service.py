@@ -7,7 +7,7 @@ import os
 import sys
 
 from vosk_listener import vosk_listener
-from porcupine_listener import porcupine_listener
+from openwakeword_listener import openwakeword_listener
 from fuzzy_parser import init_fuzzy, processa_comandi, command_queue, stop_event
 
 # ==============================
@@ -42,11 +42,17 @@ def vosk_thread():
         ready_event=vosk_ready_event
     )
 
-def porcupine_thread():
+def openwakeword_thread():
     print("[MAIN] Attesa Vosk pronta...")
     vosk_ready_event.wait()
-    print("[MAIN] Avvio Porcupine listener...")
-    porcupine_listener(audio_queue, stop_event, CONFIG["porcupine"])
+    print(
+        "[MAIN] Avvio openWakeWord listener..."
+    )
+    openwakeword_listener(
+        audio_queue,
+        stop_event,
+        CONFIG["openwakeword"]
+    )
 
 def invia_comando_ha(cmd, ha_url, ha_token):
     headers = {
@@ -84,14 +90,14 @@ def ha_command_consumer(ha_url, ha_token):
 # Avvio thread
 # ==============================
 t_vosk = threading.Thread(target=vosk_thread, daemon=True)
-t_porc = threading.Thread(target=porcupine_thread, daemon=True)
+t_wakeword = threading.Thread(target=openwakeword_thread,daemon=True)
 t_fuzzy = threading.Thread(target=processa_comandi, daemon=True)
 ha_url = CONFIG['homeassistant']['url'].rstrip('/') + '/api/services'
 ha_token = CONFIG['homeassistant']['token']
 t_ha = threading.Thread(target=ha_command_consumer, args=(ha_url, ha_token), daemon=True)
 
 t_vosk.start()
-t_porc.start()
+t_wakeword.start()
 t_fuzzy.start()
 t_ha.start()
 
@@ -107,7 +113,7 @@ except KeyboardInterrupt:
     print("\n[MAIN] Stop richiesto, chiusura thread...")
     stop_event.set()
     t_vosk.join()
-    t_porc.join()
+    t_wakeword.join()
     t_fuzzy.join()
     t_ha.join()
     print("[MAIN] Tutto terminato.")
