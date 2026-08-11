@@ -223,3 +223,4 @@ modifica volume microfono
 amixer cset numid=1 62259
 62259 è circa il 95% di 65536.
 
+vedi il log del service

@@ -19,8 +19,8 @@ from openwakeword.model import Model
 
 TARGET_SAMPLE_RATE = 16_000
 
-# Il microfono USB supporta 44.1 kHz / 48 kHz.
-# Utilizziamo 48 kHz perché il rapporto con 16 kHz è 3:1.
+# Il microfono USB lavora correttamente a 48 kHz.
+# openWakeWord, WebRTC VAD e Vosk lavorano a 16 kHz.
 DEVICE_SAMPLE_RATE = 48_000
 
 INPUT_DEVICE_INDEX = 0
@@ -28,39 +28,40 @@ INPUT_DEVICE_INDEX = 0
 CHANNELS = 1
 AUDIO_FORMAT = pyaudio.paInt16
 
-# openWakeWord lavora bene con frame da circa 80 ms:
+# openWakeWord lavora bene con blocchi da circa 80 ms.
 #
 # 16.000 Hz * 0.080 s = 1280 samples
 #
 OWW_FRAME_LENGTH = 1_280
 
-# A 48 kHz dobbiamo leggere:
+# A 48 kHz:
 #
-# 48.000 / 16.000 = 3
 # 1280 * 3 = 3840 samples
 #
 DEVICE_FRAME_LENGTH = OWW_FRAME_LENGTH * 3
 
 
 # ============================================================
-# WAKE WORD BEEP
+# BEEP CONFIGURATION
 # ============================================================
 
 BEEP_FILE = "/home/homeassistant/KeyVoice/sounds/wake.wav"
 
-# Uscita audio ALSA.
 # Sound Blaster Play! 4
 BEEP_DEVICE = "plughw:3,0"
 
 
+# ============================================================
+# BEEP
+# ============================================================
+
 def play_beep() -> None:
     """
-    Riproduce il beep di conferma dopo il riconoscimento
-    della wake word.
+    Riproduce il beep dopo il riconoscimento della wake word.
 
-    Il metodo è bloccante intenzionalmente:
-    prima viene riprodotto il breve beep e subito dopo
-    KeyVoice inizia ad aspettare il comando vocale.
+    È volutamente bloccante:
+    il beep termina e subito dopo parte la finestra
+    di ascolto del comando.
     """
 
     if not os.path.exists(BEEP_FILE):
@@ -96,16 +97,18 @@ def play_beep() -> None:
 
 
 # ============================================================
-# AUDIO UTILITIES
+# AUDIO CONVERSION
 # ============================================================
 
 def convert_48k_to_16k(
     pcm_bytes: bytes
 ) -> np.ndarray:
     """
-    Converte audio PCM int16 mono da 48 kHz a 16 kHz.
+    Converte PCM mono int16:
 
-    Restituisce un array numpy int16 pronto per:
+        48 kHz -> 16 kHz
+
+    Il risultato può essere passato direttamente a:
     - openWakeWord
     - WebRTC VAD
     - Vosk
@@ -129,12 +132,16 @@ def convert_48k_to_16k(
     ).astype(np.int16)
 
 
+# ============================================================
+# AUDIO READ
+# ============================================================
+
 def read_audio_chunk(
     stream: pyaudio.Stream
 ) -> np.ndarray:
     """
-    Legge un chunk dal microfono a 48 kHz
-    e lo converte automaticamente a 16 kHz.
+    Legge circa 80 ms dal microfono a 48 kHz
+    e restituisce immediatamente audio a 16 kHz.
     """
 
     pcm = stream.read(
@@ -156,8 +163,7 @@ def save_debug_audio(
     sample_rate: int
 ) -> None:
     """
-    Salva il comando registrato come WAV,
-    utile per debug di VAD / Vosk.
+    Salva il comando inviato a Vosk come file WAV.
     """
 
     debug_dir = "debug_audio"
@@ -212,7 +218,7 @@ def openwakeword_listener(
 ) -> None:
 
     # ========================================================
-    # CONFIG
+    # CONFIGURATION
     # ========================================================
 
     model_name = config.get(
@@ -230,19 +236,50 @@ def openwakeword_listener(
         False
     )
 
+    # Tempo massimo concesso per iniziare a parlare
+    # dopo il beep.
     vad_voice_start_timeout = config.get(
         "vad_voice_start_timeout",
         1.5
     )
 
+    # Silenzio necessario per considerare
+    # terminato il comando.
     vad_voice_end_sec = config.get(
         "vad_voice_end_sec",
-        0.4
+        0.6
     )
 
+    # Durata massima assoluta di un comando.
+    # Impedisce registrazioni da 30-40 secondi.
+    max_command_seconds = config.get(
+        "max_command_seconds",
+        6.0
+    )
+
+    # Piccolo margine registrato dopo
+    # la fine del comando.
     post_buffer_seconds = config.get(
         "post_buffer_seconds",
         0.1
+    )
+
+    # Durata minima accettabile di un comando.
+    min_command_seconds = config.get(
+        "min_command_seconds",
+        0.4
+    )
+
+    # Modalità WebRTC VAD:
+    #
+    # 0 = molto permissiva
+    # 1 = permissiva
+    # 2 = media
+    # 3 = aggressiva
+    #
+    vad_mode = config.get(
+        "vad_mode",
+        2
     )
 
     print(
@@ -255,6 +292,29 @@ def openwakeword_listener(
 
     print(
         f"[OPENWAKEWORD] Threshold: {threshold}"
+    )
+
+    print(
+        "[OPENWAKEWORD] "
+        f"VAD mode: {vad_mode}"
+    )
+
+    print(
+        "[OPENWAKEWORD] "
+        f"Timeout inizio comando: "
+        f"{vad_voice_start_timeout}s"
+    )
+
+    print(
+        "[OPENWAKEWORD] "
+        f"Silenzio fine comando: "
+        f"{vad_voice_end_sec}s"
+    )
+
+    print(
+        "[OPENWAKEWORD] "
+        f"Durata massima comando: "
+        f"{max_command_seconds}s"
     )
 
     # ========================================================
@@ -274,6 +334,7 @@ def openwakeword_listener(
         )
 
     except Exception as exc:
+
         print(
             "[OPENWAKEWORD] "
             f"Errore caricamento modello: {exc}"
@@ -287,7 +348,6 @@ def openwakeword_listener(
     # ========================================================
 
     audio = pyaudio.PyAudio()
-
     stream = None
 
     try:
@@ -327,6 +387,7 @@ def openwakeword_listener(
         )
 
     except Exception as exc:
+
         print(
             "[OPENWAKEWORD] "
             f"Errore apertura microfono: {exc}"
@@ -347,24 +408,18 @@ def openwakeword_listener(
 
     vad = webrtcvad.Vad()
 
-    # 0 = permissivo
-    # 3 = molto aggressivo
-    vad.set_mode(2)
+    vad.set_mode(
+        vad_mode
+    )
 
+    # WebRTC VAD accetta frame da:
+    # 10, 20 oppure 30 ms.
     vad_frame_ms = 30
 
     vad_frame_length = int(
         TARGET_SAMPLE_RATE
         * vad_frame_ms
         / 1000
-    )
-
-    max_voice_inactive_frames = max(
-        1,
-        int(
-            vad_voice_end_sec
-            / (vad_frame_ms / 1000)
-        )
     )
 
     # ========================================================
@@ -376,7 +431,8 @@ def openwakeword_listener(
 
     recording = False
 
-    voice_inactive_frames = 0
+    command_start_time = None
+    last_voice_time = None
 
     # ========================================================
     # VAD HELPER
@@ -385,9 +441,9 @@ def openwakeword_listener(
     def process_vad_frames() -> bool:
         """
         Analizza tutti i frame da 30 ms presenti
-        nel buffer VAD.
+        nel buffer.
 
-        Restituisce True se almeno un frame
+        Restituisce True se almeno uno dei frame
         contiene voce.
         """
 
@@ -412,19 +468,23 @@ def openwakeword_listener(
             ).tobytes()
 
             try:
-                if vad.is_speech(
+
+                is_speech = vad.is_speech(
                     frame_bytes,
                     TARGET_SAMPLE_RATE
-                ):
-                    speech_detected = True
+                )
 
             except Exception as exc:
+
                 print(
                     f"[VAD] Errore: {exc}"
                 )
 
-                # In caso di errore VAD,
-                # meglio non troncare il comando.
+                # Preferiamo non troncare il comando
+                # in caso di errore del VAD.
+                is_speech = True
+
+            if is_speech:
                 speech_detected = True
 
         return speech_detected
@@ -434,6 +494,7 @@ def openwakeword_listener(
     # ========================================================
 
     try:
+
         while not stop_event.is_set():
 
             pcm_np = read_audio_chunk(
@@ -455,9 +516,8 @@ def openwakeword_listener(
                     0
                 )
 
-                # Mostriamo solo score interessanti
-                # per non riempire inutilmente il log.
                 if score >= 0.05:
+
                     print(
                         "[OPENWAKEWORD] "
                         f"score={score:.3f}"
@@ -491,31 +551,37 @@ def openwakeword_listener(
                 )
 
                 # =============================================
-                # RESET REGISTRAZIONE
+                # RESET
                 # =============================================
 
                 audio_buffer.clear()
                 vad_buffer.clear()
 
-                voice_inactive_frames = 0
-
                 # =============================================
-                # WAIT FOR COMMAND START
+                # WAIT FOR VOICE START
                 # =============================================
 
                 voice_detected = False
 
-                start_time = time.time()
+                voice_wait_start = (
+                    time.monotonic()
+                )
 
                 while (
                     not voice_detected
                     and not stop_event.is_set()
-                    and (
-                        time.time()
-                        - start_time
-                        < vad_voice_start_timeout
-                    )
                 ):
+
+                    elapsed_wait = (
+                        time.monotonic()
+                        - voice_wait_start
+                    )
+
+                    if (
+                        elapsed_wait
+                        >= vad_voice_start_timeout
+                    ):
+                        break
 
                     pcm_wait = read_audio_chunk(
                         stream
@@ -530,10 +596,16 @@ def openwakeword_listener(
                     )
 
                     if process_vad_frames():
+
                         voice_detected = True
 
+                        now = time.monotonic()
+
+                        command_start_time = now
+                        last_voice_time = now
+
                 # =============================================
-                # NO VOICE
+                # NO COMMAND AFTER WAKE WORD
                 # =============================================
 
                 if not voice_detected:
@@ -546,10 +618,13 @@ def openwakeword_listener(
                     audio_buffer.clear()
                     vad_buffer.clear()
 
+                    command_start_time = None
+                    last_voice_time = None
+
                     continue
 
                 # =============================================
-                # COMMAND STARTED
+                # START RECORDING
                 # =============================================
 
                 print(
@@ -558,10 +633,9 @@ def openwakeword_listener(
                 )
 
                 recording = True
-                voice_inactive_frames = 0
 
-                # Il primo audio del comando è già
-                # presente in audio_buffer.
+                # Il primo pezzo parlato è già presente
+                # in audio_buffer.
                 continue
 
             # =================================================
@@ -580,19 +654,43 @@ def openwakeword_listener(
                 process_vad_frames()
             )
 
-            if speech_detected:
-                voice_inactive_frames = 0
+            now = time.monotonic()
 
-            else:
-                voice_inactive_frames += 1
+            if speech_detected:
+
+                last_voice_time = now
+
+            # =================================================
+            # TIMERS
+            # =================================================
+
+            command_elapsed = (
+                now
+                - command_start_time
+            )
+
+            silence_elapsed = (
+                now
+                - last_voice_time
+            )
+
+            silence_timeout = (
+                silence_elapsed
+                >= vad_voice_end_sec
+            )
+
+            max_timeout = (
+                command_elapsed
+                >= max_command_seconds
+            )
 
             # =================================================
             # COMMAND STILL ACTIVE
             # =================================================
 
             if (
-                voice_inactive_frames
-                < max_voice_inactive_frames
+                not silence_timeout
+                and not max_timeout
             ):
                 continue
 
@@ -600,10 +698,22 @@ def openwakeword_listener(
             # END COMMAND
             # =================================================
 
-            print(
-                "[LISTENER] "
-                "Fine registrazione (VAD)"
-            )
+            if max_timeout:
+
+                print(
+                    "[LISTENER] "
+                    "Timeout massimo comando "
+                    f"raggiunto "
+                    f"({command_elapsed:.2f}s)"
+                )
+
+            else:
+
+                print(
+                    "[LISTENER] "
+                    "Fine registrazione "
+                    f"(silenzio {silence_elapsed:.2f}s)"
+                )
 
             # =================================================
             # POST BUFFER
@@ -645,14 +755,13 @@ def openwakeword_listener(
 
             print(
                 "[LISTENER] "
-                f"Audio comando: {duration:.2f}s"
+                f"Audio comando: "
+                f"{duration:.2f}s"
             )
 
             # =================================================
             # SEND TO VOSK
             # =================================================
-
-            min_command_seconds = 0.4
 
             min_samples = int(
                 min_command_seconds
@@ -681,32 +790,37 @@ def openwakeword_listener(
                 )
 
                 if save_debug:
+
                     save_debug_audio(
                         buffer_to_send,
                         TARGET_SAMPLE_RATE
                     )
 
             else:
+
                 print(
                     "[LISTENER] "
                     "Audio troppo corto, ignoro"
                 )
 
             # =================================================
-            # RESET
+            # RESET FOR NEXT WAKE WORD
             # =================================================
 
             audio_buffer.clear()
             vad_buffer.clear()
 
-            voice_inactive_frames = 0
             recording = False
+
+            command_start_time = None
+            last_voice_time = None
 
     # ========================================================
     # ERROR
     # ========================================================
 
     except Exception as exc:
+
         print(
             "[OPENWAKEWORD] "
             f"Errore listener: {exc}"
@@ -719,6 +833,7 @@ def openwakeword_listener(
     # ========================================================
 
     finally:
+
         print(
             "[OPENWAKEWORD] "
             "Chiusura listener"
@@ -727,6 +842,7 @@ def openwakeword_listener(
         if stream is not None:
 
             try:
+
                 if stream.is_active():
                     stream.stop_stream()
 
@@ -734,6 +850,7 @@ def openwakeword_listener(
                 pass
 
             try:
+
                 stream.close()
 
             except Exception:
