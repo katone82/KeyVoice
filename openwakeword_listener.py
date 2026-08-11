@@ -18,7 +18,6 @@ from openwakeword.model import Model
 # ============================================================
 
 TARGET_SAMPLE_RATE = 16_000
-
 DEVICE_SAMPLE_RATE = 48_000
 
 INPUT_DEVICE_INDEX = 0
@@ -31,6 +30,16 @@ OWW_FRAME_LENGTH = 1_280
 
 # 80 ms a 48 kHz
 DEVICE_FRAME_LENGTH = OWW_FRAME_LENGTH * 3
+
+
+# ============================================================
+# LISTENER STATES
+# ============================================================
+
+STATE_LISTENING = "listening"
+STATE_WAIT_COMMAND = "wait_command"
+STATE_RECORDING = "recording"
+STATE_COOLDOWN = "cooldown"
 
 
 # ============================================================
@@ -75,7 +84,7 @@ def play_beep() -> None:
 
 
 # ============================================================
-# AUDIO UTILITIES
+# AUDIO CONVERSION
 # ============================================================
 
 def convert_48k_to_16k(
@@ -99,6 +108,10 @@ def convert_48k_to_16k(
         32767
     ).astype(np.int16)
 
+
+# ============================================================
+# AUDIO READ
+# ============================================================
 
 def read_audio_chunk(
     stream: pyaudio.Stream
@@ -223,11 +236,6 @@ def openwakeword_listener(
         0.1
     )
 
-    # Tempo durante il quale il microfono viene letto,
-    # ma openWakeWord NON viene interrogato.
-    #
-    # Serve ad evitare una riattivazione immediata
-    # causata dalla coda del comando precedente.
     wakeword_cooldown_sec = config.get(
         "wakeword_cooldown_sec",
         1.2
@@ -251,7 +259,25 @@ def openwakeword_listener(
 
     print(
         "[OPENWAKEWORD] "
-        f"Cooldown wake word: "
+        f"Timeout inizio comando: "
+        f"{vad_voice_start_timeout}s"
+    )
+
+    print(
+        "[OPENWAKEWORD] "
+        f"Timeout silenzio: "
+        f"{vad_voice_end_sec}s"
+    )
+
+    print(
+        "[OPENWAKEWORD] "
+        f"Durata massima comando: "
+        f"{max_command_seconds}s"
+    )
+
+    print(
+        "[OPENWAKEWORD] "
+        f"Cooldown: "
         f"{wakeword_cooldown_sec}s"
     )
 
@@ -361,66 +387,92 @@ def openwakeword_listener(
     )
 
     # ========================================================
-    # STATE
+    # BUFFERS
     # ========================================================
 
     audio_buffer: List[int] = []
     vad_buffer: List[int] = []
 
-    recording = False
+    # ========================================================
+    # STATE
+    # ========================================================
 
+    state = STATE_LISTENING
+
+    wait_command_start = None
     command_start_time = None
     last_voice_time = None
-
-    cooldown_until = 0.0
-    cooldown_logged = False
+    cooldown_until = None
 
     # ========================================================
-    # RESET
+    # HELPERS
     # ========================================================
 
-    def reset_to_listening(
-        reason: str,
-        apply_cooldown: bool = True
-    ) -> None:
-
-        nonlocal recording
-        nonlocal command_start_time
-        nonlocal last_voice_time
-        nonlocal cooldown_until
-        nonlocal cooldown_logged
-
+    def clear_buffers() -> None:
         audio_buffer.clear()
         vad_buffer.clear()
 
-        recording = False
+    def enter_listening(
+        reason: str = ""
+    ) -> None:
 
+        nonlocal state
+        nonlocal wait_command_start
+        nonlocal command_start_time
+        nonlocal last_voice_time
+        nonlocal cooldown_until
+
+        clear_buffers()
+
+        wait_command_start = None
         command_start_time = None
         last_voice_time = None
+        cooldown_until = None
 
-        if apply_cooldown:
+        state = STATE_LISTENING
 
-            cooldown_until = (
-                time.monotonic()
-                + wakeword_cooldown_sec
+        if reason:
+
+            print(
+                "[LISTENER] "
+                f"In ascolto wake word "
+                f"({reason})"
             )
-
-            cooldown_logged = False
 
         else:
 
-            cooldown_until = 0.0
-            cooldown_logged = True
+            print(
+                "[LISTENER] "
+                "In ascolto wake word"
+            )
+
+    def enter_cooldown(
+        reason: str
+    ) -> None:
+
+        nonlocal state
+        nonlocal wait_command_start
+        nonlocal command_start_time
+        nonlocal last_voice_time
+        nonlocal cooldown_until
+
+        clear_buffers()
+
+        wait_command_start = None
+        command_start_time = None
+        last_voice_time = None
+
+        cooldown_until = (
+            time.monotonic()
+            + wakeword_cooldown_sec
+        )
+
+        state = STATE_COOLDOWN
 
         print(
             "[LISTENER] "
-            f"Reset -> ascolto wake word "
-            f"({reason})"
+            f"Cooldown ({reason})"
         )
-
-    # ========================================================
-    # VAD HELPER
-    # ========================================================
 
     def process_vad_frames() -> bool:
 
@@ -465,6 +517,14 @@ def openwakeword_listener(
         return speech_detected
 
     # ========================================================
+    # INITIAL STATE
+    # ========================================================
+
+    enter_listening(
+        "avvio"
+    )
+
+    # ========================================================
     # MAIN LOOP
     # ========================================================
 
@@ -482,32 +542,24 @@ def openwakeword_listener(
             # COOLDOWN
             # =================================================
 
-            if now < cooldown_until:
+            if state == STATE_COOLDOWN:
 
-                # Continuiamo a leggere il microfono
-                # così svuotiamo fisicamente l'audio residuo,
-                # ma NON lo passiamo ad openWakeWord.
+                if (
+                    cooldown_until is not None
+                    and now >= cooldown_until
+                ):
+
+                    enter_listening(
+                        "cooldown terminato"
+                    )
 
                 continue
 
-            if (
-                cooldown_until > 0
-                and not cooldown_logged
-            ):
-
-                print(
-                    "[LISTENER] "
-                    "Ascolto wake word riattivato"
-                )
-
-                cooldown_logged = True
-                cooldown_until = 0.0
-
             # =================================================
-            # WAIT WAKE WORD
+            # LISTENING
             # =================================================
 
-            if not recording:
+            if state == STATE_LISTENING:
 
                 prediction = model.predict(
                     pcm_np
@@ -538,270 +590,309 @@ def openwakeword_listener(
 
                 print()
 
-                # =================================================
+                # =============================================
                 # BEEP
-                # =================================================
+                # =============================================
 
                 play_beep()
 
-                print(
-                    "[LISTENER] Attendo comando..."
-                )
+                # =============================================
+                # ENTER WAIT COMMAND
+                # =============================================
 
-                audio_buffer.clear()
-                vad_buffer.clear()
+                clear_buffers()
 
-                # =================================================
-                # WAIT COMMAND START
-                # =================================================
-
-                voice_detected = False
-
-                voice_wait_start = (
+                wait_command_start = (
                     time.monotonic()
                 )
 
-                while (
-                    not voice_detected
-                    and not stop_event.is_set()
+                state = (
+                    STATE_WAIT_COMMAND
+                )
+
+                print(
+                    "[LISTENER] "
+                    "Attendo comando..."
+                )
+
+                continue
+
+            # =================================================
+            # WAIT COMMAND
+            # =================================================
+
+            if state == STATE_WAIT_COMMAND:
+
+                audio_buffer.extend(
+                    pcm_np.tolist()
+                )
+
+                vad_buffer.extend(
+                    pcm_np.tolist()
+                )
+
+                voice_detected = (
+                    process_vad_frames()
+                )
+
+                if voice_detected:
+
+                    now = time.monotonic()
+
+                    command_start_time = now
+                    last_voice_time = now
+
+                    state = (
+                        STATE_RECORDING
+                    )
+
+                    print(
+                        "[LISTENER] "
+                        "Inizio registrazione comando"
+                    )
+
+                    continue
+
+                # Sicurezza
+                if wait_command_start is None:
+
+                    enter_listening(
+                        "stato WAIT non valido"
+                    )
+
+                    continue
+
+                elapsed_wait = (
+                    now
+                    - wait_command_start
+                )
+
+                if (
+                    elapsed_wait
+                    >= vad_voice_start_timeout
                 ):
-
-                    elapsed_wait = (
-                        time.monotonic()
-                        - voice_wait_start
-                    )
-
-                    if (
-                        elapsed_wait
-                        >= vad_voice_start_timeout
-                    ):
-                        break
-
-                    pcm_wait = read_audio_chunk(
-                        stream
-                    )
-
-                    audio_buffer.extend(
-                        pcm_wait.tolist()
-                    )
-
-                    vad_buffer.extend(
-                        pcm_wait.tolist()
-                    )
-
-                    if process_vad_frames():
-
-                        voice_detected = True
-
-                        now = time.monotonic()
-
-                        command_start_time = now
-                        last_voice_time = now
-
-                # =================================================
-                # NO COMMAND
-                # =================================================
-
-                if not voice_detected:
 
                     print(
                         "[LISTENER] "
                         "Nessuna voce dopo wake word"
                     )
 
-                    reset_to_listening(
-                        "nessun comando"
+                    # Qui NON serve cooldown:
+                    # non abbiamo registrato alcun comando.
+                    enter_listening(
+                        "timeout comando"
+                    )
+
+                continue
+
+            # =================================================
+            # RECORDING
+            # =================================================
+
+            if state == STATE_RECORDING:
+
+                audio_buffer.extend(
+                    pcm_np.tolist()
+                )
+
+                vad_buffer.extend(
+                    pcm_np.tolist()
+                )
+
+                speech_detected = (
+                    process_vad_frames()
+                )
+
+                if speech_detected:
+                    last_voice_time = now
+
+                # =============================================
+                # STATE SAFETY
+                # =============================================
+
+                if (
+                    command_start_time is None
+                    or last_voice_time is None
+                ):
+
+                    print(
+                        "[LISTENER] "
+                        "Stato registrazione "
+                        "non valido"
+                    )
+
+                    enter_listening(
+                        "reset sicurezza"
                     )
 
                     continue
 
-                # =================================================
-                # COMMAND START
-                # =================================================
+                # =============================================
+                # TIMERS
+                # =============================================
+
+                command_elapsed = (
+                    now
+                    - command_start_time
+                )
+
+                silence_elapsed = (
+                    now
+                    - last_voice_time
+                )
+
+                silence_timeout = (
+                    silence_elapsed
+                    >= vad_voice_end_sec
+                )
+
+                command_timeout = (
+                    command_elapsed
+                    >= max_command_seconds
+                )
+
+                if (
+                    not silence_timeout
+                    and not command_timeout
+                ):
+
+                    continue
+
+                # =============================================
+                # END COMMAND
+                # =============================================
+
+                if command_timeout:
+
+                    print(
+                        "[LISTENER] "
+                        "Timeout massimo comando "
+                        f"({command_elapsed:.2f}s)"
+                    )
+
+                else:
+
+                    print(
+                        "[LISTENER] "
+                        "Fine registrazione "
+                        f"(silenzio "
+                        f"{silence_elapsed:.2f}s)"
+                    )
+
+                # =============================================
+                # POST BUFFER
+                # =============================================
+
+                post_samples = int(
+                    post_buffer_seconds
+                    * TARGET_SAMPLE_RATE
+                )
+
+                post_buffer: List[int] = []
+
+                while (
+                    len(post_buffer)
+                    < post_samples
+                    and not stop_event.is_set()
+                ):
+
+                    pcm_post = read_audio_chunk(
+                        stream
+                    )
+
+                    post_buffer.extend(
+                        pcm_post.tolist()
+                    )
+
+                audio_buffer.extend(
+                    post_buffer
+                )
+
+                # =============================================
+                # DURATION
+                # =============================================
+
+                duration = (
+                    len(audio_buffer)
+                    / TARGET_SAMPLE_RATE
+                )
 
                 print(
                     "[LISTENER] "
-                    "Inizio registrazione comando"
+                    f"Audio comando: "
+                    f"{duration:.2f}s"
                 )
 
-                recording = True
+                # =============================================
+                # SEND TO VOSK
+                # =============================================
+
+                min_samples = int(
+                    min_command_seconds
+                    * TARGET_SAMPLE_RATE
+                )
+
+                if (
+                    len(audio_buffer)
+                    >= min_samples
+                ):
+
+                    buffer_to_send = list(
+                        audio_buffer
+                    )
+
+                    audio_queue.put(
+                        (
+                            buffer_to_send,
+                            TARGET_SAMPLE_RATE
+                        )
+                    )
+
+                    print(
+                        "[LISTENER] "
+                        "Buffer inviato a Vosk"
+                    )
+
+                    if save_debug:
+
+                        save_debug_audio(
+                            buffer_to_send,
+                            TARGET_SAMPLE_RATE
+                        )
+
+                else:
+
+                    print(
+                        "[LISTENER] "
+                        "Audio troppo corto, ignoro"
+                    )
+
+                # =============================================
+                # FORCE COOLDOWN
+                # =============================================
+
+                enter_cooldown(
+                    "comando completato"
+                )
 
                 continue
 
             # =================================================
-            # RECORD COMMAND
+            # UNKNOWN STATE SAFETY
             # =================================================
-
-            audio_buffer.extend(
-                pcm_np.tolist()
-            )
-
-            vad_buffer.extend(
-                pcm_np.tolist()
-            )
-
-            speech_detected = (
-                process_vad_frames()
-            )
-
-            now = time.monotonic()
-
-            if speech_detected:
-
-                last_voice_time = now
-
-            # Sicurezza
-            if (
-                command_start_time is None
-                or last_voice_time is None
-            ):
-
-                reset_to_listening(
-                    "stato registrazione non valido"
-                )
-
-                continue
-
-            command_elapsed = (
-                now
-                - command_start_time
-            )
-
-            silence_elapsed = (
-                now
-                - last_voice_time
-            )
-
-            silence_timeout = (
-                silence_elapsed
-                >= vad_voice_end_sec
-            )
-
-            max_timeout = (
-                command_elapsed
-                >= max_command_seconds
-            )
-
-            if (
-                not silence_timeout
-                and not max_timeout
-            ):
-                continue
-
-            # =================================================
-            # END COMMAND
-            # =================================================
-
-            if max_timeout:
-
-                print(
-                    "[LISTENER] "
-                    "Timeout massimo comando "
-                    f"({command_elapsed:.2f}s)"
-                )
-
-            else:
-
-                print(
-                    "[LISTENER] "
-                    "Fine registrazione "
-                    f"(silenzio "
-                    f"{silence_elapsed:.2f}s)"
-                )
-
-            # =================================================
-            # POST BUFFER
-            # =================================================
-
-            post_samples = int(
-                post_buffer_seconds
-                * TARGET_SAMPLE_RATE
-            )
-
-            post_buffer: List[int] = []
-
-            while (
-                len(post_buffer)
-                < post_samples
-                and not stop_event.is_set()
-            ):
-
-                pcm_post = read_audio_chunk(
-                    stream
-                )
-
-                post_buffer.extend(
-                    pcm_post.tolist()
-                )
-
-            audio_buffer.extend(
-                post_buffer
-            )
-
-            duration = (
-                len(audio_buffer)
-                / TARGET_SAMPLE_RATE
-            )
 
             print(
                 "[LISTENER] "
-                f"Audio comando: "
-                f"{duration:.2f}s"
+                f"Stato sconosciuto: {state}"
             )
 
-            # =================================================
-            # SEND TO VOSK
-            # =================================================
-
-            min_samples = int(
-                min_command_seconds
-                * TARGET_SAMPLE_RATE
+            enter_listening(
+                "reset stato sconosciuto"
             )
 
-            if (
-                len(audio_buffer)
-                >= min_samples
-            ):
-
-                buffer_to_send = list(
-                    audio_buffer
-                )
-
-                audio_queue.put(
-                    (
-                        buffer_to_send,
-                        TARGET_SAMPLE_RATE
-                    )
-                )
-
-                print(
-                    "[LISTENER] "
-                    "Buffer inviato a Vosk"
-                )
-
-                if save_debug:
-
-                    save_debug_audio(
-                        buffer_to_send,
-                        TARGET_SAMPLE_RATE
-                    )
-
-            else:
-
-                print(
-                    "[LISTENER] "
-                    "Audio troppo corto, ignoro"
-                )
-
-            # =================================================
-            # IMPORTANT: FORCE REARM
-            # =================================================
-
-            reset_to_listening(
-                "comando completato"
-            )
-
-            continue
+    # ========================================================
+    # ERROR
+    # ========================================================
 
     except Exception as exc:
 
@@ -811,6 +902,10 @@ def openwakeword_listener(
         )
 
         stop_event.set()
+
+    # ========================================================
+    # CLEANUP
+    # ========================================================
 
     finally:
 
