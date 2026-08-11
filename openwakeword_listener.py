@@ -238,7 +238,7 @@ def openwakeword_listener(
 
     wakeword_cooldown_sec = config.get(
         "wakeword_cooldown_sec",
-        1.2
+        2.0
     )
 
     print(
@@ -539,6 +539,24 @@ def openwakeword_listener(
             now = time.monotonic()
 
             # =================================================
+            # OPENWAKEWORD
+            #
+            # IMPORTANTE:
+            # predict() viene eseguito SEMPRE, in QUALUNQUE
+            # stato, per mantenere aggiornato il contesto
+            # interno del modello.
+            # =================================================
+
+            prediction = model.predict(
+                pcm_np
+            )
+
+            score = prediction.get(
+                model_name,
+                0
+            )
+
+            # =================================================
             # COOLDOWN
             # =================================================
 
@@ -560,15 +578,6 @@ def openwakeword_listener(
             # =================================================
 
             if state == STATE_LISTENING:
-
-                prediction = model.predict(
-                    pcm_np
-                )
-
-                score = prediction.get(
-                    model_name,
-                    0
-                )
 
                 if score >= 0.05:
 
@@ -653,7 +662,10 @@ def openwakeword_listener(
 
                     continue
 
-                # Sicurezza
+                # =============================================
+                # SAFETY
+                # =============================================
+
                 if wait_command_start is None:
 
                     enter_listening(
@@ -667,6 +679,10 @@ def openwakeword_listener(
                     - wait_command_start
                 )
 
+                # =============================================
+                # TIMEOUT WAIT
+                # =============================================
+
                 if (
                     elapsed_wait
                     >= vad_voice_start_timeout
@@ -677,10 +693,10 @@ def openwakeword_listener(
                         "Nessuna voce dopo wake word"
                     )
 
-                    # Qui NON serve cooldown:
-                    # non abbiamo registrato alcun comando.
-                    enter_listening(
-                        "timeout comando"
+                    # Usiamo cooldown anche qui per evitare
+                    # una catena di false wake consecutive.
+                    enter_cooldown(
+                        "nessun comando"
                     )
 
                 continue
@@ -721,7 +737,7 @@ def openwakeword_listener(
                         "non valido"
                     )
 
-                    enter_listening(
+                    enter_cooldown(
                         "reset sicurezza"
                     )
 
@@ -800,6 +816,12 @@ def openwakeword_listener(
                         stream
                     )
 
+                    # Anche qui alimentiamo openWakeWord,
+                    # visto che stiamo leggendo audio.
+                    model.predict(
+                        pcm_post
+                    )
+
                     post_buffer.extend(
                         pcm_post.tolist()
                     )
@@ -868,7 +890,7 @@ def openwakeword_listener(
                     )
 
                 # =============================================
-                # FORCE COOLDOWN
+                # COOLDOWN
                 # =============================================
 
                 enter_cooldown(
@@ -878,7 +900,7 @@ def openwakeword_listener(
                 continue
 
             # =================================================
-            # UNKNOWN STATE SAFETY
+            # UNKNOWN STATE
             # =================================================
 
             print(
@@ -886,7 +908,7 @@ def openwakeword_listener(
                 f"Stato sconosciuto: {state}"
             )
 
-            enter_listening(
+            enter_cooldown(
                 "reset stato sconosciuto"
             )
 
