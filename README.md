@@ -217,4 +217,9 @@ Utilizza log e messaggi di console per verificare il comportamento durante lo sv
 pip install -r requirements.txt
 
 
+trip
+
+modifica volume microfono
+amixer cset numid=1 62259
+62259 è circa il 95% di 65536.
 

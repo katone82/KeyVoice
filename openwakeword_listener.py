@@ -349,7 +349,7 @@ def openwakeword_listener(
 
     # 0 = permissivo
     # 3 = molto aggressivo
-    vad.set_mode(3)
+    vad.set_mode(2)
 
     vad_frame_ms = 30
 
