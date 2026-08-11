@@ -1,4 +1,5 @@
 import os
+import queue
 import subprocess
 import threading
 import time
@@ -6,7 +7,7 @@ import wave
 from typing import List
 
 import numpy as np
-import pyaudio
+import sounddevice as sd
 import webrtcvad
 from scipy.signal import resample_poly
 
@@ -18,20 +19,29 @@ from openwakeword.model import Model
 # ============================================================
 
 TARGET_SAMPLE_RATE = 16_000
+
+# La Sound Blaster Play! 4 lavora bene a 48 kHz.
 DEVICE_SAMPLE_RATE = 48_000
 
-INPUT_DEVICE_INDEX = 0
-
 CHANNELS = 1
-AUDIO_FORMAT = pyaudio.paInt16
+AUDIO_DTYPE = "int16"
 
-# openWakeWord:
-# 80 ms a 16 kHz = 1280 samples
+# 80 ms a 16 kHz
 OWW_FRAME_LENGTH = 1_280
 
-# Microfono:
-# 80 ms a 48 kHz = 3840 samples
+# 80 ms a 48 kHz
 DEVICE_FRAME_LENGTH = OWW_FRAME_LENGTH * 3
+
+
+# ============================================================
+# SOUNDDEVICE
+# ============================================================
+
+# Cerchiamo il dispositivo per nome e NON per indice.
+INPUT_DEVICE_NAME = "Sound Blaster Play! 4"
+
+# Massimo numero di chunk audio tenuti in attesa.
+AUDIO_QUEUE_MAXSIZE = 50
 
 
 # ============================================================
@@ -53,10 +63,6 @@ BEEP_DEVICE = "plughw:3,0"
 
 
 def play_beep() -> None:
-    """
-    Riproduce il beep quando viene riconosciuta la wake word.
-    """
-
     if not os.path.exists(BEEP_FILE):
         print(
             f"[BEEP] File non trovato: {BEEP_FILE}"
@@ -90,22 +96,76 @@ def play_beep() -> None:
 
 
 # ============================================================
+# DEVICE SEARCH
+# ============================================================
+
+def find_input_device(
+    device_name: str
+) -> int:
+    """
+    Cerca un dispositivo sounddevice per nome.
+
+    Deve avere almeno un canale di input.
+    """
+
+    devices = sd.query_devices()
+
+    print(
+        "[AUDIO] Dispositivi input disponibili:"
+    )
+
+    for index, device in enumerate(devices):
+
+        max_input_channels = device.get(
+            "max_input_channels",
+            0
+        )
+
+        if max_input_channels <= 0:
+            continue
+
+        print(
+            f"[AUDIO]   {index}: "
+            f"{device['name']} "
+            f"(IN={max_input_channels}, "
+            f"RATE={device['default_samplerate']})"
+        )
+
+    wanted = device_name.lower()
+
+    for index, device in enumerate(devices):
+
+        if (
+            device.get("max_input_channels", 0) > 0
+            and wanted in device["name"].lower()
+        ):
+            print(
+                "[AUDIO] Microfono selezionato: "
+                f"{index} - {device['name']}"
+            )
+
+            return index
+
+    raise RuntimeError(
+        f"Dispositivo audio non trovato: {device_name}"
+    )
+
+
+# ============================================================
 # AUDIO CONVERSION
 # ============================================================
 
 def convert_48k_to_16k(
-    pcm_bytes: bytes
+    audio_48k: np.ndarray
 ) -> np.ndarray:
     """
-    Converte PCM mono int16:
+    Converte int16 mono:
 
         48 kHz -> 16 kHz
     """
 
-    audio_48k = np.frombuffer(
-        pcm_bytes,
-        dtype=np.int16
-    )
+    if audio_48k.ndim > 1:
+        audio_48k = audio_48k[:, 0]
 
     audio_16k = resample_poly(
         audio_48k.astype(np.float32),
@@ -121,28 +181,6 @@ def convert_48k_to_16k(
 
 
 # ============================================================
-# AUDIO READ
-# ============================================================
-
-def read_audio_chunk(
-    stream: pyaudio.Stream
-) -> np.ndarray:
-    """
-    Legge circa 80 ms dal microfono a 48 kHz
-    e restituisce audio a 16 kHz.
-    """
-
-    pcm = stream.read(
-        DEVICE_FRAME_LENGTH,
-        exception_on_overflow=False
-    )
-
-    return convert_48k_to_16k(
-        pcm
-    )
-
-
-# ============================================================
 # DEBUG AUDIO
 # ============================================================
 
@@ -150,9 +188,6 @@ def save_debug_audio(
     buffer: List[int],
     sample_rate: int
 ) -> None:
-    """
-    Salva il comando inviato a Vosk.
-    """
 
     debug_dir = "debug_audio"
 
@@ -256,17 +291,14 @@ def openwakeword_listener(
 
     wakeword_cooldown_sec = config.get(
         "wakeword_cooldown_sec",
-        2.0
+        1.5
     )
 
-    # Ogni quanti secondi rigenerare:
-    # - stream PyAudio
-    # - modello openWakeWord
-    #
-    # Durante i test consiglio 300 = 5 minuti.
-    listener_refresh_seconds = config.get(
-        "listener_refresh_seconds",
-        300
+    # Se per questo numero di secondi non arriva più
+    # nessun callback audio, ricreiamo InputStream.
+    audio_watchdog_seconds = config.get(
+        "audio_watchdog_seconds",
+        3.0
     )
 
     print(
@@ -287,60 +319,17 @@ def openwakeword_listener(
 
     print(
         "[OPENWAKEWORD] "
-        f"Timeout inizio comando: "
-        f"{vad_voice_start_timeout}s"
-    )
-
-    print(
-        "[OPENWAKEWORD] "
-        f"Silenzio fine comando: "
-        f"{vad_voice_end_sec}s"
-    )
-
-    print(
-        "[OPENWAKEWORD] "
-        f"Durata massima comando: "
-        f"{max_command_seconds}s"
-    )
-
-    print(
-        "[OPENWAKEWORD] "
-        f"Cooldown: "
-        f"{wakeword_cooldown_sec}s"
-    )
-
-    print(
-        "[OPENWAKEWORD] "
-        f"Refresh listener: "
-        f"{listener_refresh_seconds}s"
+        f"Audio watchdog: "
+        f"{audio_watchdog_seconds}s"
     )
 
     # ========================================================
-    # PYAUDIO
+    # MODEL
     # ========================================================
 
-    audio = pyaudio.PyAudio()
+    try:
 
-    stream = None
-    model = None
-
-    model_created_at = 0.0
-
-    # ========================================================
-    # MODEL CREATION
-    # ========================================================
-
-    def create_wake_model():
-        """
-        Ricrea completamente openWakeWord.
-        """
-
-        print(
-            "[OPENWAKEWORD] "
-            "Caricamento modello..."
-        )
-
-        new_model = Model(
+        model = Model(
             wakeword_models=[
                 model_name
             ],
@@ -348,131 +337,21 @@ def openwakeword_listener(
         )
 
         print(
-            "[OPENWAKEWORD] "
-            "Modello caricato"
+            "[OPENWAKEWORD] Modello caricato"
         )
-
-        return new_model
-
-    # ========================================================
-    # MICROPHONE OPEN
-    # ========================================================
-
-    def open_microphone():
-        """
-        Apre lo stream del microfono.
-        """
-
-        device_info = (
-            audio.get_device_info_by_index(
-                INPUT_DEVICE_INDEX
-            )
-        )
-
-        print(
-            "[OPENWAKEWORD] "
-            f"Microfono: "
-            f"{device_info['name']}"
-        )
-
-        print(
-            "[OPENWAKEWORD] "
-            f"Device index: "
-            f"{INPUT_DEVICE_INDEX}"
-        )
-
-        print(
-            "[OPENWAKEWORD] "
-            f"Capture audio: "
-            f"{DEVICE_SAMPLE_RATE} Hz"
-        )
-
-        print(
-            "[OPENWAKEWORD] "
-            f"Processing audio: "
-            f"{TARGET_SAMPLE_RATE} Hz"
-        )
-
-        new_stream = audio.open(
-            rate=DEVICE_SAMPLE_RATE,
-            channels=CHANNELS,
-            format=AUDIO_FORMAT,
-            input=True,
-            input_device_index=INPUT_DEVICE_INDEX,
-            frames_per_buffer=DEVICE_FRAME_LENGTH
-        )
-
-        print(
-            "[OPENWAKEWORD] "
-            "Microfono aperto"
-        )
-
-        return new_stream
-
-    # ========================================================
-    # MICROPHONE CLOSE
-    # ========================================================
-
-    def close_microphone(
-        current_stream
-    ) -> None:
-
-        if current_stream is None:
-            return
-
-        try:
-
-            if current_stream.is_active():
-                current_stream.stop_stream()
-
-        except Exception:
-            pass
-
-        try:
-
-            current_stream.close()
-
-        except Exception:
-            pass
-
-    # ========================================================
-    # INITIAL MODEL + MICROPHONE
-    # ========================================================
-
-    try:
-
-        model = create_wake_model()
-
-        model_created_at = (
-            time.monotonic()
-        )
-
-        stream = open_microphone()
 
     except Exception as exc:
 
         print(
             "[OPENWAKEWORD] "
-            f"Errore inizializzazione: {exc}"
+            f"Errore caricamento modello: {exc}"
         )
-
-        close_microphone(
-            stream
-        )
-
-        audio.terminate()
 
         stop_event.set()
-
         return
 
-    print(
-        "[OPENWAKEWORD] "
-        "Listener pronto"
-    )
-
     # ========================================================
-    # VAD
+    # WEBRTC VAD
     # ========================================================
 
     vad = webrtcvad.Vad()
@@ -490,11 +369,276 @@ def openwakeword_listener(
     )
 
     # ========================================================
-    # BUFFERS
+    # INTERNAL AUDIO QUEUE
+    #
+    # Questa coda è SOLO tra callback sounddevice
+    # e listener openWakeWord.
+    # Non è la audio_queue destinata a Vosk.
     # ========================================================
 
-    audio_buffer: List[int] = []
-    vad_buffer: List[int] = []
+    mic_queue = queue.Queue(
+        maxsize=AUDIO_QUEUE_MAXSIZE
+    )
+
+    # ========================================================
+    # CALLBACK HEARTBEAT
+    # ========================================================
+
+    heartbeat_lock = threading.Lock()
+
+    last_audio_callback = (
+        time.monotonic()
+    )
+
+    callback_count = 0
+
+    # ========================================================
+    # CALLBACK SOUNDDEVICE
+    # ========================================================
+
+    def audio_callback(
+        indata,
+        frames,
+        callback_time,
+        status
+    ):
+        """
+        Callback PortAudio.
+
+        Deve essere velocissima:
+        copia il frame e lo mette nella coda.
+
+        Nessun openWakeWord/VAD/Vosk viene eseguito qui.
+        """
+
+        nonlocal last_audio_callback
+        nonlocal callback_count
+
+        if status:
+            print(
+                f"[AUDIO] Callback status: {status}"
+            )
+
+        with heartbeat_lock:
+
+            last_audio_callback = (
+                time.monotonic()
+            )
+
+            callback_count += 1
+
+        chunk = np.array(
+            indata,
+            dtype=np.int16,
+            copy=True
+        )
+
+        try:
+
+            mic_queue.put_nowait(
+                chunk
+            )
+
+        except queue.Full:
+
+            # Se per qualche motivo il consumer rallenta,
+            # scartiamo il frame più vecchio.
+            try:
+                mic_queue.get_nowait()
+
+            except queue.Empty:
+                pass
+
+            try:
+                mic_queue.put_nowait(
+                    chunk
+                )
+
+            except queue.Full:
+                pass
+
+    # ========================================================
+    # DEVICE
+    # ========================================================
+
+    try:
+
+        input_device_index = (
+            find_input_device(
+                INPUT_DEVICE_NAME
+            )
+        )
+
+        device_info = sd.query_devices(
+            input_device_index,
+            "input"
+        )
+
+        print(
+            "[AUDIO] Device: "
+            f"{device_info['name']}"
+        )
+
+        print(
+            "[AUDIO] Default sample rate: "
+            f"{device_info['default_samplerate']}"
+        )
+
+        print(
+            "[AUDIO] Capture: "
+            f"{DEVICE_SAMPLE_RATE} Hz"
+        )
+
+        print(
+            "[AUDIO] Processing: "
+            f"{TARGET_SAMPLE_RATE} Hz"
+        )
+
+    except Exception as exc:
+
+        print(
+            "[AUDIO] "
+            f"Errore ricerca microfono: {exc}"
+        )
+
+        stop_event.set()
+        return
+
+    # ========================================================
+    # STREAM MANAGEMENT
+    # ========================================================
+
+    stream = None
+
+    def clear_mic_queue() -> None:
+
+        while True:
+
+            try:
+                mic_queue.get_nowait()
+
+            except queue.Empty:
+                return
+
+    def start_audio_stream() -> None:
+
+        nonlocal stream
+        nonlocal last_audio_callback
+
+        if stream is not None:
+
+            try:
+                stream.stop()
+
+            except Exception:
+                pass
+
+            try:
+                stream.close()
+
+            except Exception:
+                pass
+
+            stream = None
+
+        clear_mic_queue()
+
+        print(
+            "[AUDIO] Apertura InputStream..."
+        )
+
+        stream = sd.InputStream(
+            device=input_device_index,
+            samplerate=DEVICE_SAMPLE_RATE,
+            blocksize=DEVICE_FRAME_LENGTH,
+            channels=CHANNELS,
+            dtype=AUDIO_DTYPE,
+            callback=audio_callback
+        )
+
+        stream.start()
+
+        with heartbeat_lock:
+
+            last_audio_callback = (
+                time.monotonic()
+            )
+
+        print(
+            "[AUDIO] InputStream attivo"
+        )
+
+    def restart_audio_stream(
+        reason: str
+    ) -> bool:
+
+        nonlocal stream
+
+        print()
+        print(
+            "[AUDIO] =============================="
+        )
+        print(
+            f"[AUDIO] Riavvio stream: {reason}"
+        )
+        print(
+            "[AUDIO] =============================="
+        )
+
+        try:
+
+            if stream is not None:
+
+                try:
+                    stream.abort()
+
+                except Exception:
+                    pass
+
+                try:
+                    stream.close()
+
+                except Exception:
+                    pass
+
+                stream = None
+
+            clear_mic_queue()
+
+            time.sleep(
+                0.3
+            )
+
+            start_audio_stream()
+
+            print(
+                "[AUDIO] Stream ripristinato"
+            )
+
+            return True
+
+        except Exception as exc:
+
+            print(
+                "[AUDIO] "
+                f"ERRORE riavvio stream: {exc}"
+            )
+
+            return False
+
+    try:
+
+        start_audio_stream()
+
+    except Exception as exc:
+
+        print(
+            "[AUDIO] "
+            f"Errore apertura InputStream: {exc}"
+        )
+
+        stop_event.set()
+        return
 
     # ========================================================
     # STATE
@@ -502,26 +646,22 @@ def openwakeword_listener(
 
     state = STATE_LISTENING
 
+    audio_buffer: List[int] = []
+    vad_buffer: List[int] = []
+
     wait_command_start = None
     command_start_time = None
     last_voice_time = None
-
     cooldown_until = None
 
-    refresh_pending = False
-
     # ========================================================
-    # BUFFER RESET
+    # STATE HELPERS
     # ========================================================
 
-    def clear_buffers() -> None:
+    def clear_command_buffers() -> None:
 
         audio_buffer.clear()
         vad_buffer.clear()
-
-    # ========================================================
-    # ENTER LISTENING
-    # ========================================================
 
     def enter_listening(
         reason: str = ""
@@ -533,7 +673,7 @@ def openwakeword_listener(
         nonlocal last_voice_time
         nonlocal cooldown_until
 
-        clear_buffers()
+        clear_command_buffers()
 
         wait_command_start = None
         command_start_time = None
@@ -557,10 +697,6 @@ def openwakeword_listener(
                 "In ascolto wake word"
             )
 
-    # ========================================================
-    # ENTER COOLDOWN
-    # ========================================================
-
     def enter_cooldown(
         reason: str
     ) -> None:
@@ -571,7 +707,7 @@ def openwakeword_listener(
         nonlocal last_voice_time
         nonlocal cooldown_until
 
-        clear_buffers()
+        clear_command_buffers()
 
         wait_command_start = None
         command_start_time = None
@@ -636,151 +772,31 @@ def openwakeword_listener(
         return speech_detected
 
     # ========================================================
-    # REFRESH LISTENER
+    # READ FROM CALLBACK QUEUE
     # ========================================================
 
-    def refresh_listener() -> bool:
+    def get_next_audio_chunk():
         """
-        Rigenera completamente solo la parte wake-word:
+        Attende al massimo 250 ms.
 
-        - chiude PyAudio stream
-        - ricrea openWakeWord
-        - riapre PyAudio stream
-
-        Vosk, fuzzy parser e Home Assistant
-        continuano a funzionare normalmente.
+        Questo è fondamentale:
+        non abbiamo più una read() che può bloccarsi
+        indefinitamente.
         """
-
-        nonlocal stream
-        nonlocal model
-        nonlocal model_created_at
-        nonlocal refresh_pending
-
-        print()
-        print(
-            "[OPENWAKEWORD] "
-            "=============================="
-        )
-
-        print(
-            "[OPENWAKEWORD] "
-            "Refresh completo listener"
-        )
-
-        print(
-            "[OPENWAKEWORD] "
-            "=============================="
-        )
 
         try:
 
-            # ------------------------------------------------
-            # MICROPHONE CLOSE
-            # ------------------------------------------------
-
-            close_microphone(
-                stream
+            audio_48k = mic_queue.get(
+                timeout=0.25
             )
 
-            stream = None
+        except queue.Empty:
 
-            # Piccolo intervallo per rilasciare ALSA/USB.
-            time.sleep(
-                0.25
-            )
+            return None
 
-            # ------------------------------------------------
-            # MODEL
-            # ------------------------------------------------
-
-            model = create_wake_model()
-
-            # ------------------------------------------------
-            # MICROPHONE
-            # ------------------------------------------------
-
-            stream = open_microphone()
-
-            # ------------------------------------------------
-            # TIME
-            # ------------------------------------------------
-
-            model_created_at = (
-                time.monotonic()
-            )
-
-            refresh_pending = False
-
-            # ------------------------------------------------
-            # RESET STATE
-            # ------------------------------------------------
-
-            enter_listening(
-                "listener rigenerato"
-            )
-
-            print(
-                "[OPENWAKEWORD] "
-                "Refresh completato"
-            )
-
-            print()
-
-            return True
-
-        except Exception as exc:
-
-            print(
-                "[OPENWAKEWORD] "
-                f"Errore refresh: {exc}"
-            )
-
-            # Proviamo a recuperare almeno
-            # lo stream audio.
-            try:
-
-                close_microphone(
-                    stream
-                )
-
-                stream = None
-
-                time.sleep(
-                    1
-                )
-
-                stream = open_microphone()
-
-                model = create_wake_model()
-
-                model_created_at = (
-                    time.monotonic()
-                )
-
-                refresh_pending = False
-
-                enter_listening(
-                    "recovery listener"
-                )
-
-                print(
-                    "[OPENWAKEWORD] "
-                    "Recovery completato"
-                )
-
-                return True
-
-            except Exception as recovery_exc:
-
-                print(
-                    "[OPENWAKEWORD] "
-                    "ERRORE recovery listener: "
-                    f"{recovery_exc}"
-                )
-
-                stop_event.set()
-
-                return False
+        return convert_48k_to_16k(
+            audio_48k
+        )
 
     # ========================================================
     # INITIAL STATE
@@ -799,71 +815,55 @@ def openwakeword_listener(
         while not stop_event.is_set():
 
             # =================================================
-            # PERIODIC REFRESH CHECK
+            # AUDIO WATCHDOG
             # =================================================
 
             now = time.monotonic()
 
-            listener_age = (
-                now
-                - model_created_at
-            )
+            with heartbeat_lock:
+
+                callback_age = (
+                    now
+                    - last_audio_callback
+                )
 
             if (
-                listener_refresh_seconds > 0
-                and listener_age
-                >= listener_refresh_seconds
+                callback_age
+                >= audio_watchdog_seconds
             ):
 
-                refresh_pending = True
+                print(
+                    "[AUDIO] "
+                    "WATCHDOG: callback audio fermo "
+                    f"da {callback_age:.2f}s"
+                )
 
-            # Refresh solo quando non stiamo
-            # registrando o aspettando un comando.
-            if (
-                refresh_pending
-                and state == STATE_LISTENING
-            ):
+                if not restart_audio_stream(
+                    "watchdog callback"
+                ):
 
-                if not refresh_listener():
+                    stop_event.set()
                     break
+
+                enter_listening(
+                    "audio stream recuperato"
+                )
 
                 continue
 
             # =================================================
-            # READ AUDIO
+            # GET AUDIO
             # =================================================
 
-            try:
+            pcm_np = get_next_audio_chunk()
 
-                pcm_np = read_audio_chunk(
-                    stream
-                )
-
-            except Exception as exc:
-
-                print(
-                    "[OPENWAKEWORD] "
-                    "Errore lettura microfono: "
-                    f"{exc}"
-                )
-
-                print(
-                    "[OPENWAKEWORD] "
-                    "Forzo refresh listener"
-                )
-
-                if not refresh_listener():
-                    break
-
+            if pcm_np is None:
                 continue
 
             now = time.monotonic()
 
             # =================================================
-            # OPENWAKEWORD
-            #
-            # IMPORTANTE:
-            # il modello viene alimentato SEMPRE.
+            # OPENWAKEWORD SEMPRE ALIMENTATO
             # =================================================
 
             try:
@@ -881,17 +881,8 @@ def openwakeword_listener(
 
                 print(
                     "[OPENWAKEWORD] "
-                    "Errore predict: "
-                    f"{exc}"
+                    f"Errore predict: {exc}"
                 )
-
-                print(
-                    "[OPENWAKEWORD] "
-                    "Forzo refresh listener"
-                )
-
-                if not refresh_listener():
-                    break
 
                 continue
 
@@ -938,17 +929,9 @@ def openwakeword_listener(
 
                 print()
 
-                # =============================================
-                # BEEP
-                # =============================================
-
                 play_beep()
 
-                # =============================================
-                # WAIT COMMAND
-                # =============================================
-
-                clear_buffers()
+                clear_command_buffers()
 
                 wait_command_start = (
                     time.monotonic()
@@ -983,8 +966,6 @@ def openwakeword_listener(
 
                 if voice_detected:
 
-                    now = time.monotonic()
-
                     command_start_time = now
                     last_voice_time = now
 
@@ -1000,18 +981,18 @@ def openwakeword_listener(
                 if wait_command_start is None:
 
                     enter_cooldown(
-                        "stato WAIT non valido"
+                        "WAIT non valido"
                     )
 
                     continue
 
-                elapsed_wait = (
+                wait_elapsed = (
                     now
                     - wait_command_start
                 )
 
                 if (
-                    elapsed_wait
+                    wait_elapsed
                     >= vad_voice_start_timeout
                 ):
 
@@ -1048,29 +1029,16 @@ def openwakeword_listener(
 
                     last_voice_time = now
 
-                # =============================================
-                # STATE SAFETY
-                # =============================================
-
                 if (
                     command_start_time is None
                     or last_voice_time is None
                 ):
 
-                    print(
-                        "[LISTENER] "
-                        "Stato registrazione non valido"
-                    )
-
                     enter_cooldown(
-                        "reset sicurezza"
+                        "stato recording non valido"
                     )
 
                     continue
-
-                # =============================================
-                # TIMERS
-                # =============================================
 
                 command_elapsed = (
                     now
@@ -1098,10 +1066,6 @@ def openwakeword_listener(
                 ):
 
                     continue
-
-                # =============================================
-                # END COMMAND
-                # =============================================
 
                 if command_timeout:
 
@@ -1131,20 +1095,33 @@ def openwakeword_listener(
 
                 post_buffer: List[int] = []
 
+                post_deadline = (
+                    time.monotonic()
+                    + 1.0
+                )
+
                 while (
                     len(post_buffer)
                     < post_samples
                     and not stop_event.is_set()
+                    and time.monotonic()
+                    < post_deadline
                 ):
 
-                    pcm_post = read_audio_chunk(
-                        stream
+                    pcm_post = (
+                        get_next_audio_chunk()
                     )
 
-                    # Manteniamo openWakeWord alimentato.
-                    model.predict(
-                        pcm_post
-                    )
+                    if pcm_post is None:
+                        continue
+
+                    # openWakeWord continua ad avanzare
+                    try:
+                        model.predict(
+                            pcm_post
+                        )
+                    except Exception:
+                        pass
 
                     post_buffer.extend(
                         pcm_post.tolist()
@@ -1155,7 +1132,7 @@ def openwakeword_listener(
                 )
 
                 # =============================================
-                # DURATION
+                # COMMAND DURATION
                 # =============================================
 
                 duration = (
@@ -1213,10 +1190,6 @@ def openwakeword_listener(
                         "Audio troppo corto, ignoro"
                     )
 
-                # =============================================
-                # COOLDOWN
-                # =============================================
-
                 enter_cooldown(
                     "comando completato"
                 )
@@ -1233,11 +1206,11 @@ def openwakeword_listener(
             )
 
             enter_cooldown(
-                "reset stato sconosciuto"
+                "reset stato"
             )
 
     # ========================================================
-    # FATAL ERROR
+    # ERROR
     # ========================================================
 
     except Exception as exc:
@@ -1260,12 +1233,14 @@ def openwakeword_listener(
             "Chiusura listener"
         )
 
-        close_microphone(
-            stream
-        )
+        if stream is not None:
 
-        try:
-            audio.terminate()
+            try:
+                stream.abort()
+            except Exception:
+                pass
 
-        except Exception:
-            pass
+            try:
+                stream.close()
+            except Exception:
+                pass
