@@ -3,6 +3,7 @@ import os
 import queue
 import re
 import threading
+import traceback
 import unicodedata
 
 import requests
@@ -10,7 +11,7 @@ from rapidfuzz import process
 
 
 # ============================================================
-# CODE CONDIVISE / STOP EVENT
+# CODE CONDIVISE
 # ============================================================
 
 command_queue = queue.Queue()
@@ -20,7 +21,7 @@ stop_event = threading.Event()
 
 
 # ============================================================
-# VARIABILI GLOBALI
+# CONFIGURAZIONE RUNTIME
 # ============================================================
 
 DOMOTICA_FILE = ""
@@ -42,14 +43,6 @@ AZIONE_SYNONYMS = {}
 # ============================================================
 
 def normalize(text: str) -> str:
-    """
-    Normalizza una stringa:
-    - lowercase
-    - rimozione accenti
-    - rimozione punteggiatura
-    - trim spazi
-    """
-
     if not text:
         return ""
 
@@ -67,11 +60,17 @@ def normalize(text: str) -> str:
         text
     )
 
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
     return text.strip()
 
 
 # ============================================================
-# AGGIORNAMENTO DISPOSITIVI HOME ASSISTANT
+# AGGIORNAMENTO DISPOSITIVI DA HOME ASSISTANT
 # ============================================================
 
 def aggiorna_dispositivi():
@@ -88,7 +87,7 @@ def aggiorna_dispositivi():
         response = requests.get(
             HA_URL,
             headers=headers,
-            timeout=5
+            timeout=10
         )
 
         response.raise_for_status()
@@ -96,19 +95,17 @@ def aggiorna_dispositivi():
         data = response.json()
 
         print(
-            "[FUZZY] Chiamata Home Assistant riuscita: "
+            f"[FUZZY] Home Assistant raggiunto: "
             f"{len(data)} entità ricevute"
         )
 
         entita_local = {}
         stanze_local = set()
 
-        for device in data:
-            entity_id = device.get(
-                "entity_id"
-            )
+        for item in data:
+            entity_id = item.get("entity_id")
 
-            attributes = device.get(
+            attributes = item.get(
                 "attributes",
                 {}
             )
@@ -131,18 +128,17 @@ def aggiorna_dispositivi():
                 friendly_normalized
             ] = entity_id
 
-            # Mantengo la logica attuale:
-            # parole con iniziale maiuscola considerate
-            # possibili stanze.
             for part in friendly_name.split():
-
                 if not part:
                     continue
 
                 if part[0].isupper():
-                    stanze_local.add(
-                        normalize(part)
-                    )
+                    stanza = normalize(part)
+
+                    if stanza:
+                        stanze_local.add(
+                            stanza
+                        )
 
         MAPPING.clear()
         MAPPING.update(
@@ -176,7 +172,6 @@ def aggiorna_dispositivi():
             "w",
             encoding="utf-8"
         ) as file:
-
             json.dump(
                 domotica_data,
                 file,
@@ -185,13 +180,12 @@ def aggiorna_dispositivi():
             )
 
             file.flush()
-
             os.fsync(
                 file.fileno()
             )
 
         print(
-            "[FUZZY] domotica.json aggiornato con successo"
+            "[FUZZY] domotica.json aggiornato"
         )
 
         print(
@@ -199,19 +193,22 @@ def aggiorna_dispositivi():
         )
 
         print(
-            f"[FUZZY] Entità caricate: {len(ENTITA)}"
+            f"[FUZZY] Entità disponibili: "
+            f"{len(ENTITA)}"
         )
 
         print(
-            f"[FUZZY] Stanze rilevate: {len(STANZE)}"
+            f"[FUZZY] Stanze rilevate: "
+            f"{len(STANZE)}"
         )
 
     except Exception as exc:
-
         print(
-            "[FUZZY] Errore aggiornamento dispositivi: "
-            f"{exc}"
+            "[FUZZY] Errore aggiornamento "
+            f"dispositivi Home Assistant: {exc}"
         )
+
+        traceback.print_exc()
 
         raise SystemExit(
             "[FUZZY] Impossibile continuare "
@@ -228,13 +225,12 @@ def carica_domotica():
         not os.path.exists(DOMOTICA_FILE)
         or os.path.getsize(DOMOTICA_FILE) == 0
     ):
-
         print(
-            "[FUZZY] domotica.json non trovato o vuoto"
+            "[FUZZY] domotica.json non presente "
+            "o vuoto"
         )
 
         aggiorna_dispositivi()
-
         return
 
     try:
@@ -243,13 +239,11 @@ def carica_domotica():
             "r",
             encoding="utf-8"
         ) as file:
-
             domotica_data = json.load(
                 file
             )
 
         ENTITA.clear()
-
         ENTITA.extend(
             domotica_data.get(
                 "entita",
@@ -258,7 +252,6 @@ def carica_domotica():
         )
 
         STANZE.clear()
-
         STANZE.extend(
             domotica_data.get(
                 "stanze",
@@ -267,7 +260,6 @@ def carica_domotica():
         )
 
         MAPPING.clear()
-
         MAPPING.update(
             domotica_data.get(
                 "mapping",
@@ -276,37 +268,32 @@ def carica_domotica():
         )
 
         print(
-            "[FUZZY] domotica.json caricato correttamente"
+            "[FUZZY] domotica.json caricato"
         )
 
         print(
-            f"[FUZZY] File: {DOMOTICA_FILE}"
+            f"[FUZZY] Entità: {len(ENTITA)}"
         )
 
         print(
-            f"[FUZZY] Entità trovate: {len(ENTITA)}"
-        )
-
-        print(
-            f"[FUZZY] Stanze trovate: {len(STANZE)}"
+            f"[FUZZY] Stanze: {len(STANZE)}"
         )
 
     except Exception as exc:
-
         print(
-            "[FUZZY] Errore lettura domotica.json: "
-            f"{exc}"
+            "[FUZZY] Errore lettura "
+            f"domotica.json: {exc}"
         )
 
         print(
-            "[FUZZY] Ricreo domotica.json..."
+            "[FUZZY] Ricreo domotica.json"
         )
 
         aggiorna_dispositivi()
 
 
 # ============================================================
-# CARICAMENTO SINONIMI
+# CARICAMENTO SINONIMI AZIONI
 # ============================================================
 
 def carica_sinonimi():
@@ -315,14 +302,12 @@ def carica_sinonimi():
     if not os.path.exists(
         SYNONYMS_FILE
     ):
-
         print(
             "[FUZZY] File sinonimi non trovato: "
             f"{SYNONYMS_FILE}"
         )
 
         AZIONE_SYNONYMS = {}
-
         return
 
     try:
@@ -331,9 +316,8 @@ def carica_sinonimi():
             "r",
             encoding="utf-8"
         ) as file:
-
-            AZIONE_SYNONYMS = (
-                json.load(file)
+            AZIONE_SYNONYMS = json.load(
+                file
             )
 
         print(
@@ -341,18 +325,22 @@ def carica_sinonimi():
             f"{SYNONYMS_FILE}"
         )
 
-    except Exception as exc:
-
         print(
-            "[FUZZY] Errore caricamento sinonimi: "
-            f"{exc}"
+            "[FUZZY] Azioni canoniche: "
+            f"{list(AZIONE_SYNONYMS.keys())}"
+        )
+
+    except Exception as exc:
+        print(
+            "[FUZZY] Errore caricamento "
+            f"sinonimi: {exc}"
         )
 
         AZIONE_SYNONYMS = {}
 
 
 # ============================================================
-# INIZIALIZZAZIONE FUZZY
+# INIZIALIZZAZIONE
 # ============================================================
 
 def init_fuzzy(config: dict):
@@ -393,7 +381,7 @@ def init_fuzzy(config: dict):
     )
 
     print(
-        "[FUZZY] Inizializzazione..."
+        "[FUZZY] Inizializzazione"
     )
 
     print(
@@ -401,7 +389,6 @@ def init_fuzzy(config: dict):
     )
 
     carica_sinonimi()
-
     carica_domotica()
 
     print(
@@ -410,40 +397,46 @@ def init_fuzzy(config: dict):
 
 
 # ============================================================
-# NORMALIZZAZIONE AZIONE
+# COSTRUZIONE VOCABOLARIO AZIONI
 # ============================================================
 
-def normalize_action(
-    azione_rilevata: str
-) -> str:
+def build_action_candidates():
+    """
+    Restituisce una mappa:
 
-    azione_normalizzata = normalize(
-        azione_rilevata
-    )
+    variante_normalizzata -> azione_canonica
+
+    Esempio:
+    accendi     -> accendi
+    accendere   -> accendi
+    accendete   -> accendi
+    spegnere    -> spegni
+    """
+
+    candidates = {}
 
     for canon, synonyms in (
         AZIONE_SYNONYMS.items()
     ):
-
         canon_normalized = normalize(
             canon
         )
 
-        if (
-            azione_normalizzata
-            == canon_normalized
-        ):
-            return canon
+        candidates[
+            canon_normalized
+        ] = canon
 
         for synonym in synonyms:
+            synonym_normalized = normalize(
+                synonym
+            )
 
-            if (
-                azione_normalizzata
-                == normalize(synonym)
-            ):
-                return canon
+            if synonym_normalized:
+                candidates[
+                    synonym_normalized
+                ] = canon
 
-    return azione_rilevata
+    return candidates
 
 
 # ============================================================
@@ -453,28 +446,96 @@ def normalize_action(
 def trova_azione(
     frase_norm: str
 ):
+    candidates = build_action_candidates()
 
-    if not AZIONI:
+    if not candidates:
         return None
 
-    match = process.extractOne(
-        frase_norm,
-        AZIONI
+    candidate_words = list(
+        candidates.keys()
     )
 
-    if not match:
+    frase_words = frase_norm.split()
+
+    best_score = 0
+    best_action = None
+    best_match = None
+
+    # --------------------------------------------------------
+    # PAROLE SINGOLE
+    # --------------------------------------------------------
+
+    for parola in frase_words:
+        match = process.extractOne(
+            parola,
+            candidate_words
+        )
+
+        if not match:
+            continue
+
+        matched_text = match[0]
+        score = match[1]
+
+        if score > best_score:
+            best_score = score
+            best_match = matched_text
+            best_action = candidates[
+                matched_text
+            ]
+
+    # --------------------------------------------------------
+    # BIGRAMMI
+    # Utile per future azioni composte.
+    # --------------------------------------------------------
+
+    for index in range(
+        len(frase_words) - 1
+    ):
+        ngram = " ".join(
+            frase_words[
+                index:index + 2
+            ]
+        )
+
+        match = process.extractOne(
+            ngram,
+            candidate_words
+        )
+
+        if not match:
+            continue
+
+        matched_text = match[0]
+        score = match[1]
+
+        if score > best_score:
+            best_score = score
+            best_match = matched_text
+            best_action = candidates[
+                matched_text
+            ]
+
+    # --------------------------------------------------------
+    # SOGLIA
+    # --------------------------------------------------------
+
+    if best_score < 70:
+        print(
+            "[FUZZY] Azione non riconosciuta "
+            f"(score={best_score:.1f})"
+        )
+
         return None
 
-    azione,
-    score,
-    _ = match
-
-    if score <= 70:
-        return None
-
-    return normalize_action(
-        azione
+    print(
+        "[FUZZY] Azione riconosciuta: "
+        f"{best_action} "
+        f"<- '{best_match}' "
+        f"(score={best_score:.1f})"
     )
+
+    return best_action
 
 
 # ============================================================
@@ -484,7 +545,6 @@ def trova_azione(
 def trova_entita(
     frase_norm: str
 ):
-
     if not ENTITA:
         return None
 
@@ -493,7 +553,7 @@ def trova_entita(
     )
 
     # --------------------------------------------------------
-    # Prova prima sull'intera frase
+    # MATCH INTERA FRASE
     # --------------------------------------------------------
 
     full_match = process.extractOne(
@@ -505,17 +565,22 @@ def trova_entita(
         full_match
         and full_match[1] > 95
     ):
+        print(
+            "[FUZZY] Entità full-match: "
+            f"{full_match[0]} "
+            f"(score={full_match[1]:.1f})"
+        )
+
         return full_match[0]
 
     # --------------------------------------------------------
-    # Fallback con N-GRAM
+    # N-GRAM
     # --------------------------------------------------------
 
     entita_finale = None
     best_score = 0
 
     for entita in ENTITA:
-
         entita_words = (
             entita.split()
         )
@@ -537,7 +602,6 @@ def trova_entita(
             - entita_length
             + 1
         ):
-
             ngram = " ".join(
                 frase_words[
                     index:
@@ -559,7 +623,6 @@ def trova_entita(
                 max_score = score
 
         if max_score > best_score:
-
             best_score = max_score
             entita_finale = entita
 
@@ -571,11 +634,21 @@ def trova_entita(
                 entita_finale.split()
             )
         ):
-
             entita_finale = entita
 
     if best_score < 95:
+        print(
+            "[FUZZY] Entità non riconosciuta "
+            f"(score={best_score:.1f})"
+        )
+
         return None
+
+    print(
+        "[FUZZY] Entità riconosciuta: "
+        f"{entita_finale} "
+        f"(score={best_score:.1f})"
+    )
 
     return entita_finale
 
@@ -587,29 +660,29 @@ def trova_entita(
 def trova_stanza(
     frase_norm: str
 ):
-
     if not STANZE:
         return None
 
-    stanza_finale = None
     best_score = 0
+    stanza_finale = None
+
+    frase_words = frase_norm.split()
 
     for stanza in STANZE:
+        for parola in frase_words:
+            result = process.extractOne(
+                parola,
+                [stanza]
+            )
 
-        result = process.extractOne(
-            frase_norm,
-            [stanza]
-        )
+            if not result:
+                continue
 
-        if not result:
-            continue
+            score = result[1]
 
-        score = result[1]
-
-        if score > best_score:
-
-            best_score = score
-            stanza_finale = stanza
+            if score > best_score:
+                best_score = score
+                stanza_finale = stanza
 
     if best_score < 80:
         return None
@@ -618,19 +691,17 @@ def trova_stanza(
 
 
 # ============================================================
-# FUZZY PARSER
+# PARSER FUZZY PRINCIPALE
 # ============================================================
 
 def fuzzy_parse(
     frase: str
 ):
-
     frase_norm = normalize(
         frase
     )
 
     if not frase_norm:
-
         return (
             None,
             None,
@@ -638,52 +709,53 @@ def fuzzy_parse(
             None
         )
 
-    azione = trova_azione(
+    print(
+        f"[FUZZY] Analizzo: '{frase_norm}'"
+    )
+
+    azione_finale = trova_azione(
         frase_norm
     )
 
-    entita = trova_entita(
+    entita_finale = trova_entita(
         frase_norm
     )
 
-    stanza = trova_stanza(
+    stanza_finale = trova_stanza(
         frase_norm
     )
 
-    entity_id = (
-        MAPPING.get(entita)
-        if entita
-        else None
+    entity_id = None
+
+    if entita_finale:
+        entity_id = MAPPING.get(
+            entita_finale
+        )
+
+    print(
+        "[FUZZY] Risultato:"
     )
 
     print(
-        "[FUZZY] Parsing:"
+        f"[FUZZY]   azione    = {azione_finale}"
     )
 
     print(
-        f"[FUZZY]   frase={frase_norm}"
+        f"[FUZZY]   entita    = {entita_finale}"
     )
 
     print(
-        f"[FUZZY]   azione={azione}"
+        f"[FUZZY]   stanza    = {stanza_finale}"
     )
 
     print(
-        f"[FUZZY]   entita={entita}"
-    )
-
-    print(
-        f"[FUZZY]   stanza={stanza}"
-    )
-
-    print(
-        f"[FUZZY]   entity_id={entity_id}"
+        f"[FUZZY]   entity_id = {entity_id}"
     )
 
     return (
-        azione,
-        entita,
-        stanza,
+        azione_finale,
+        entita_finale,
+        stanza_finale,
         entity_id
     )
 
@@ -709,9 +781,7 @@ def processa_comandi():
     )
 
     while not stop_event.is_set():
-
         try:
-
             frase = command_queue.get(
                 timeout=1
             )
@@ -720,109 +790,110 @@ def processa_comandi():
             continue
 
         try:
-
             (
-                azione,
-                entita,
-                stanza,
+                azione_finale,
+                entita_finale,
+                stanza_finale,
                 entity_id
             ) = fuzzy_parse(
                 frase
             )
 
             if (
-                azione
-                and entita
+                azione_finale
+                and entita_finale
                 and entity_id
             ):
-
                 result = {
-                    "azione": azione,
-                    "entita": entita,
-                    "stanza": stanza,
+                    "azione": azione_finale,
+                    "entita": entita_finale,
+                    "stanza": stanza_finale,
                     "entity_id": entity_id
                 }
 
                 print(
-                    "[COMANDI] Eseguo: "
-                    f"{result}"
+                    "[COMANDI] Comando valido:"
+                )
+
+                print(
+                    f"[COMANDI] {result}"
                 )
 
                 if profile != "test":
-
                     ha_command_queue.put(
                         result
                     )
 
                 else:
-
                     print(
-                        "[COMANDI] DEBUG: "
-                        "comando NON inviato "
-                        "a Home Assistant"
+                        "[COMANDI] Modalità TEST: "
+                        "comando non inviato"
                     )
 
             else:
-
                 print(
                     "[COMANDI] Comando non chiaro "
-                    "o entità non trovata: "
-                    f"{frase}"
+                    "o entità non trovata:"
+                )
+
+                print(
+                    f"[COMANDI] {frase}"
                 )
 
         except Exception as exc:
-
             print(
-                "[COMANDI] Errore elaborazione comando: "
-                f"{exc}"
+                "[COMANDI] Errore elaborazione "
+                f"comando: {exc}"
             )
 
-        finally:
+            traceback.print_exc()
 
+        finally:
             command_queue.task_done()
 
 
 # ============================================================
-# THREAD INVIO HOME ASSISTANT
+# THREAD HOME ASSISTANT
 # ============================================================
 
 def ha_command_consumer():
-
     print(
         "[HA] Thread consumer avviato"
     )
 
     while not stop_event.is_set():
-
         try:
-
-            command = (
-                ha_command_queue.get(
-                    timeout=1
-                )
+            command = ha_command_queue.get(
+                timeout=1
             )
 
         except queue.Empty:
             continue
 
         try:
-
             print(
-                "[HA] Invio comando a Home Assistant: "
-                f"{command}"
+                "[HA] Invio comando "
+                "a Home Assistant:"
             )
 
-            # TODO:
-            # qui implementiamo la chiamata REST
+            print(
+                f"[HA] {command}"
+            )
+
+            #
+            # TODO
+            #
+            # Qui inseriamo la chiamata REST
             # vera verso Home Assistant.
+            #
 
         except Exception as exc:
-
             print(
                 "[HA] Errore invio comando: "
                 f"{exc}"
             )
 
-        finally:
+            traceback.print_exc()
 
+        finally:
             ha_command_queue.task_done()
