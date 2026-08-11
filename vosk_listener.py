@@ -1,80 +1,333 @@
-import vosk
-import struct
-import numpy as np
-from scipy.signal import resample_poly
-from queue import Queue
 import json
 import threading
+import time
+from queue import Empty, Queue
 
-def vosk_listener(audio_queue: Queue, stop_event: threading.Event, config: dict, command_queue: Queue = None, ready_event=None):
-    import time
+import numpy as np
+import vosk
+from scipy.signal import resample_poly
+
+
+# ============================================================
+# CONFIGURAZIONE
+# ============================================================
+
+VOSK_SAMPLE_RATE = 16_000
+
+
+# ============================================================
+# AUDIO UTILITIES
+# ============================================================
+
+def prepare_audio(
+    audio_buffer,
+    sample_rate: int
+) -> np.ndarray:
     """
-    Thread Vosk: trascrive l’audio dalla coda e invia la frase semplice al fuzzy parser.
-    Non fa alcun check sul comando, solo trascrizione.
+    Converte il buffer audio in PCM int16 mono a 16 kHz,
+    pronto per Vosk.
     """
+
+    audio_array = np.asarray(
+        audio_buffer,
+        dtype=np.int16
+    )
+
+    if audio_array.size == 0:
+        return audio_array
+
+    # ========================================================
+    # RESAMPLE
+    # ========================================================
+
+    if sample_rate != VOSK_SAMPLE_RATE:
+
+        audio_array = resample_poly(
+            audio_array.astype(np.float32),
+            VOSK_SAMPLE_RATE,
+            sample_rate
+        )
+
+        audio_array = np.clip(
+            audio_array,
+            -32768,
+            32767
+        ).astype(np.int16)
+
+    # ========================================================
+    # NORMALIZZAZIONE
+    # ========================================================
+
+    max_val = np.max(
+        np.abs(
+            audio_array.astype(np.int32)
+        )
+    )
+
+    if max_val > 0:
+
+        gain = 32767.0 / max_val
+
+        audio_array = np.clip(
+            audio_array.astype(np.float32) * gain,
+            -32768,
+            32767
+        ).astype(np.int16)
+
+    return audio_array
+
+
+# ============================================================
+# VOSK LISTENER
+# ============================================================
+
+def vosk_listener(
+    audio_queue: Queue,
+    stop_event: threading.Event,
+    config: dict,
+    command_queue: Queue = None,
+    ready_event=None
+) -> None:
+    """
+    Thread Vosk.
+
+    Ogni elemento ricevuto da audio_queue rappresenta
+    UN comando completo già delimitato dal VAD.
+
+    Vosk:
+    - trascrive il buffer;
+    - produce un risultato finale;
+    - invia SOLO il risultato finale al fuzzy parser.
+
+    Le trascrizioni parziali NON vengono mai inviate
+    a command_queue.
+    """
+
     model_path = config["model_path"]
 
-    print("[VOLK] Thread partito")
-    print(f"[VOLK] Caricamento modello da: {model_path}")
+    print(
+        "[VOLK] Thread partito"
+    )
+
+    print(
+        f"[VOLK] Caricamento modello da: "
+        f"{model_path}"
+    )
+
+    # ========================================================
+    # CARICAMENTO MODELLO
+    # ========================================================
 
     try:
-        model = vosk.Model(model_path)
+
+        model = vosk.Model(
+            model_path
+        )
+
+        print(
+            "[VOLK] Modello caricato, "
+            "pronto all'ascolto"
+        )
+
         if ready_event:
             ready_event.set()
-        print("[VOLK] Modello caricato, pronto all'ascolto")
-    except Exception as e:
-        print(f"[VOLK] ERRORE caricamento modello: {e}")
+
+    except Exception as exc:
+
+        print(
+            "[VOLK] ERRORE caricamento modello: "
+            f"{exc}"
+        )
+
         return
 
+    # ========================================================
+    # LOOP
+    # ========================================================
+
     while not stop_event.is_set():
+
         try:
-            audio_buffer, sample_rate = audio_queue.get(timeout=1)
-        except Exception:
+
+            audio_buffer, sample_rate = (
+                audio_queue.get(
+                    timeout=1
+                )
+            )
+
+        except Empty:
             continue
+
+        except Exception as exc:
+
+            print(
+                "[VOLK] Errore lettura audio_queue: "
+                f"{exc}"
+            )
+
+            continue
+
+        # ====================================================
+        # VALIDAZIONE BUFFER
+        # ====================================================
 
         if not audio_buffer:
             continue
 
-        audio_array = np.array(audio_buffer, dtype=np.int16)
-
-        # Resample a 16 kHz se necessario
-        if sample_rate != 16000:
-            num_samples = int(len(audio_array) * 16000 / sample_rate)
-            if num_samples <= 0:
-                continue
-            audio_array = resample_poly(audio_array, 16000, sample_rate).astype(np.int16)
-
-        # Normalizzazione
-        max_val = np.max(np.abs(audio_array))
-        if max_val > 0:
-            audio_array = (audio_array / max_val * 32767).astype(np.int16)
-
-        # Conversione in bytes PCM
         try:
-            pcm_bytes = audio_array.tobytes()
-        except Exception as e:
-            print(f"[VOLK] ERRORE packing audio: {e}")
+
+            audio_array = prepare_audio(
+                audio_buffer,
+                sample_rate
+            )
+
+        except Exception as exc:
+
+            print(
+                "[VOLK] ERRORE preparazione audio: "
+                f"{exc}"
+            )
+
             continue
 
-        # Crea un recognizer nuovo per ogni buffer
-        rec = vosk.KaldiRecognizer(model, 16000)
+        if audio_array.size == 0:
+            continue
+
+        duration = (
+            len(audio_array)
+            / VOSK_SAMPLE_RATE
+        )
+
+        print(
+            "[VOLK] "
+            f"Elaborazione audio: {duration:.2f}s"
+        )
+
+        # ====================================================
+        # PCM BYTES
+        # ====================================================
+
         try:
-            start_time = time.time()
-            if rec.AcceptWaveform(pcm_bytes):
-                result_json = rec.Result()
-                text = json.loads(result_json).get("text", "")
-                elapsed = time.time() - start_time
-                if text.strip():
-                    print(f"[VOLK] Comando finale trascritto: {text} [Vosk decode time: {elapsed:.3f}s]")
-                    if command_queue:
-                        command_queue.put(text)
-            else:
-                partial_json = rec.PartialResult()
-                partial_text = json.loads(partial_json).get("partial", "")
-                elapsed = time.time() - start_time
-                if partial_text.strip():
-                    print(f"[VOLK] Comando parziale trascritto: {partial_text} - time: {elapsed:.3f}s]")
-                    if command_queue:
-                        command_queue.put(partial_text)
-        except Exception as e:
-            print(f"[VOLK] ERRORE riconoscimento: {e}")
+
+            pcm_bytes = (
+                audio_array.tobytes()
+            )
+
+        except Exception as exc:
+
+            print(
+                "[VOLK] ERRORE conversione PCM: "
+                f"{exc}"
+            )
+
+            continue
+
+        # ====================================================
+        # NUOVO RECOGNIZER PER OGNI COMANDO
+        # ====================================================
+
+        recognizer = vosk.KaldiRecognizer(
+            model,
+            VOSK_SAMPLE_RATE
+        )
+
+        start_time = time.monotonic()
+
+        try:
+
+            # Passiamo TUTTO il comando al recognizer.
+            #
+            # Non ci interessa se AcceptWaveform restituisce
+            # True o False: il buffer è già stato delimitato
+            # dal nostro VAD.
+
+            recognizer.AcceptWaveform(
+                pcm_bytes
+            )
+
+            # =================================================
+            # FINAL RESULT
+            # =================================================
+
+            result_json = (
+                recognizer.FinalResult()
+            )
+
+            result = json.loads(
+                result_json
+            )
+
+            text = result.get(
+                "text",
+                ""
+            ).strip()
+
+            elapsed = (
+                time.monotonic()
+                - start_time
+            )
+
+            # =================================================
+            # NESSUN TESTO
+            # =================================================
+
+            if not text:
+
+                print(
+                    "[VOLK] "
+                    "Nessun comando riconosciuto "
+                    f"[decode: {elapsed:.3f}s]"
+                )
+
+                continue
+
+            # =================================================
+            # RISULTATO FINALE
+            # =================================================
+
+            print(
+                "[VOLK] "
+                f"Comando finale trascritto: "
+                f"{text} "
+                f"[Vosk decode time: "
+                f"{elapsed:.3f}s]"
+            )
+
+            # =================================================
+            # INVIO AL FUZZY
+            # =================================================
+
+            if command_queue is not None:
+
+                command_queue.put(
+                    text
+                )
+
+                print(
+                    "[VOLK] "
+                    "Comando inviato al fuzzy parser"
+                )
+
+        except json.JSONDecodeError as exc:
+
+            print(
+                "[VOLK] "
+                f"ERRORE parsing risultato Vosk: "
+                f"{exc}"
+            )
+
+        except Exception as exc:
+
+            print(
+                "[VOLK] "
+                f"ERRORE riconoscimento: "
+                f"{exc}"
+            )
+
+    # ========================================================
+    # THREAD TERMINATO
+    # ========================================================
+
+    print(
+        "[VOLK] Thread terminato"
+    )
