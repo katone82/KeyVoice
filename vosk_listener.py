@@ -1,6 +1,9 @@
 import json
+import os
 import threading
 import time
+import unicodedata
+import re
 from queue import Empty, Queue
 
 import numpy as np
@@ -14,9 +17,88 @@ from scipy.signal import resample_poly
 
 VOSK_SAMPLE_RATE = 16_000
 
+DOMOTICA_FILENAME = "domotica.json"
+SYNONYMS_FILENAME = "azione_synonyms.json"
+
+UNKNOWN_TOKEN = "[unk]"
+
 
 # ============================================================
-# AUDIO UTILITIES
+# NORMALIZZAZIONE TESTO
+# ============================================================
+
+def normalize_text(text: str) -> str:
+    """
+    Normalizza il testo utilizzato nella grammatica Vosk:
+    - lowercase
+    - rimozione accenti
+    - rimozione punteggiatura
+    - normalizzazione spazi
+    """
+
+    if not text:
+        return ""
+
+    text = text.lower()
+
+    text = "".join(
+        char
+        for char in unicodedata.normalize("NFD", text)
+        if unicodedata.category(char) != "Mn"
+    )
+
+    text = re.sub(
+        r"[^\w\s]",
+        " ",
+        text
+    )
+
+    text = re.sub(
+        r"\s+",
+        " ",
+        text
+    )
+
+    return text.strip()
+
+
+# ============================================================
+# LETTURA JSON
+# ============================================================
+
+def load_json_file(
+    filename: str
+) -> dict:
+    try:
+        with open(
+            filename,
+            "r",
+            encoding="utf-8"
+        ) as file:
+            return json.load(file)
+
+    except FileNotFoundError:
+        print(
+            f"[VOLK] File non trovato: {filename}"
+        )
+
+    except json.JSONDecodeError as exc:
+        print(
+            f"[VOLK] JSON non valido "
+            f"{filename}: {exc}"
+        )
+
+    except Exception as exc:
+        print(
+            f"[VOLK] Errore lettura "
+            f"{filename}: {exc}"
+        )
+
+    return {}
+
+
+# ============================================================
+# PREPARAZIONE AUDIO
 # ============================================================
 
 def prepare_audio(
@@ -24,8 +106,11 @@ def prepare_audio(
     sample_rate: int
 ) -> np.ndarray:
     """
-    Converte il buffer audio in PCM int16 mono a 16 kHz,
-    pronto per Vosk.
+    Prepara l'audio per Vosk:
+    - mono
+    - int16
+    - 16 kHz
+    - normalizzazione del livello
     """
 
     audio_array = np.asarray(
@@ -55,18 +140,26 @@ def prepare_audio(
         ).astype(np.int16)
 
     # ========================================================
-    # NORMALIZZAZIONE
+    # NORMALIZZAZIONE VOLUME
     # ========================================================
 
-    max_val = np.max(
+    max_value = np.max(
         np.abs(
             audio_array.astype(np.int32)
         )
     )
 
-    if max_val > 0:
+    if max_value > 0:
 
-        gain = 32767.0 / max_val
+        gain = 32767.0 / max_value
+
+        # Evitiamo gain esagerati sul solo rumore.
+        max_gain = 3.0
+
+        gain = min(
+            gain,
+            max_gain
+        )
 
         audio_array = np.clip(
             audio_array.astype(np.float32) * gain,
@@ -75,6 +168,299 @@ def prepare_audio(
         ).astype(np.int16)
 
     return audio_array
+
+
+# ============================================================
+# PATH CONFIG
+# ============================================================
+
+def get_config_path() -> str:
+    """
+    KeyVoice/config
+
+    Non richiede modifiche a run_service.py.
+    """
+
+    project_path = os.path.dirname(
+        os.path.abspath(__file__)
+    )
+
+    return os.path.join(
+        project_path,
+        "config"
+    )
+
+
+# ============================================================
+# CARICAMENTO ENTITÀ
+# ============================================================
+
+def load_entities(
+    config_path: str
+) -> list[str]:
+
+    domotica_file = os.path.join(
+        config_path,
+        DOMOTICA_FILENAME
+    )
+
+    data = load_json_file(
+        domotica_file
+    )
+
+    entities = data.get(
+        "entita",
+        []
+    )
+
+    result = set()
+
+    for entity in entities:
+
+        normalized = normalize_text(
+            entity
+        )
+
+        if normalized:
+            result.add(
+                normalized
+            )
+
+    return sorted(
+        result
+    )
+
+
+# ============================================================
+# CARICAMENTO AZIONI
+# ============================================================
+
+def load_actions(
+    config_path: str
+) -> dict[str, list[str]]:
+
+    synonyms_file = os.path.join(
+        config_path,
+        SYNONYMS_FILENAME
+    )
+
+    data = load_json_file(
+        synonyms_file
+    )
+
+    result = {}
+
+    for canonical, synonyms in data.items():
+
+        canonical_normalized = normalize_text(
+            canonical
+        )
+
+        if not canonical_normalized:
+            continue
+
+        variants = {
+            canonical_normalized
+        }
+
+        for synonym in synonyms:
+
+            normalized = normalize_text(
+                synonym
+            )
+
+            if normalized:
+                variants.add(
+                    normalized
+                )
+
+        result[
+            canonical_normalized
+        ] = sorted(
+            variants
+        )
+
+    return result
+
+
+# ============================================================
+# COSTRUZIONE GRAMMATICA
+# ============================================================
+
+def build_vosk_grammar() -> list[str]:
+    """
+    Genera la grammatica specifica per KeyVoice.
+
+    Esempi:
+
+        accendi luce cucina
+        accendere luce cucina
+        spegni luce cucina
+        spegnere luce cucina
+
+    Vengono aggiunte anche alcune forme naturali:
+
+        accendi la luce cucina
+        spegni la luce cucina
+    """
+
+    config_path = get_config_path()
+
+    print(
+        f"[VOLK] Config path: {config_path}"
+    )
+
+    entities = load_entities(
+        config_path
+    )
+
+    actions = load_actions(
+        config_path
+    )
+
+    grammar = set()
+
+    # ========================================================
+    # PAROLE / ENTITÀ BASE
+    # ========================================================
+
+    for entity in entities:
+        grammar.add(
+            entity
+        )
+
+    action_variants = set()
+
+    for variants in actions.values():
+
+        for action in variants:
+
+            action_variants.add(
+                action
+            )
+
+            grammar.add(
+                action
+            )
+
+    # ========================================================
+    # COMANDI COMPLETI
+    # ========================================================
+
+    articles = [
+        "",
+        "la ",
+        "il ",
+        "lo ",
+        "le ",
+        "l "
+    ]
+
+    for action in action_variants:
+
+        for entity in entities:
+
+            for article in articles:
+
+                command = (
+                    f"{action} "
+                    f"{article}"
+                    f"{entity}"
+                )
+
+                grammar.add(
+                    normalize_text(
+                        command
+                    )
+                )
+
+    # ========================================================
+    # UNKNOWN
+    # ========================================================
+
+    grammar.add(
+        UNKNOWN_TOKEN
+    )
+
+    result = sorted(
+        grammar
+    )
+
+    print(
+        "[VOLK] Grammatica KeyVoice:"
+    )
+
+    print(
+        f"[VOLK]   entità: "
+        f"{len(entities)}"
+    )
+
+    print(
+        f"[VOLK]   varianti azioni: "
+        f"{len(action_variants)}"
+    )
+
+    print(
+        f"[VOLK]   frasi totali: "
+        f"{len(result)}"
+    )
+
+    return result
+
+
+# ============================================================
+# CREAZIONE RECOGNIZER
+# ============================================================
+
+def create_recognizer(
+    model,
+    grammar: list[str]
+):
+    """
+    Crea il recognizer Vosk con grammatica KeyVoice.
+    """
+
+    grammar_json = json.dumps(
+        grammar,
+        ensure_ascii=False
+    )
+
+    recognizer = vosk.KaldiRecognizer(
+        model,
+        VOSK_SAMPLE_RATE,
+        grammar_json
+    )
+
+    # Non ci servono risultati parziali al fuzzy parser.
+    # Il listener riceve già un comando completo delimitato
+    # dal VAD.
+
+    return recognizer
+
+
+# ============================================================
+# PARSING RISULTATO
+# ============================================================
+
+def get_final_text(
+    recognizer
+) -> str:
+    """
+    Recupera esclusivamente il risultato finale.
+    """
+
+    result_json = (
+        recognizer.FinalResult()
+    )
+
+    result = json.loads(
+        result_json
+    )
+
+    return result.get(
+        "text",
+        ""
+    ).strip()
 
 
 # ============================================================
@@ -89,33 +475,44 @@ def vosk_listener(
     ready_event=None
 ) -> None:
     """
-    Thread Vosk.
+    Thread Vosk di KeyVoice.
 
     Ogni elemento ricevuto da audio_queue rappresenta
-    UN comando completo già delimitato dal VAD.
+    un comando completo già delimitato dal VAD.
 
-    Vosk:
-    - trascrive il buffer;
-    - produce un risultato finale;
-    - invia SOLO il risultato finale al fuzzy parser.
+    Flusso:
 
-    Le trascrizioni parziali NON vengono mai inviate
-    a command_queue.
+        audio_queue
+            ↓
+        prepare_audio
+            ↓
+        Vosk + grammatica KeyVoice
+            ↓
+        FinalResult
+            ↓
+        command_queue
+            ↓
+        fuzzy parser
+
+    Nessun PartialResult viene mai inviato al fuzzy.
     """
 
-    model_path = config["model_path"]
+    model_path = config[
+        "model_path"
+    ]
 
     print(
         "[VOLK] Thread partito"
     )
 
     print(
-        f"[VOLK] Caricamento modello da: "
+        "[VOLK] "
+        f"Caricamento modello da: "
         f"{model_path}"
     )
 
     # ========================================================
-    # CARICAMENTO MODELLO
+    # MODEL
     # ========================================================
 
     try:
@@ -124,25 +521,89 @@ def vosk_listener(
             model_path
         )
 
-        print(
-            "[VOLK] Modello caricato, "
-            "pronto all'ascolto"
-        )
-
-        if ready_event:
-            ready_event.set()
-
     except Exception as exc:
 
         print(
-            "[VOLK] ERRORE caricamento modello: "
+            "[VOLK] "
+            f"ERRORE caricamento modello: "
             f"{exc}"
         )
 
         return
 
+    print(
+        "[VOLK] Modello caricato"
+    )
+
     # ========================================================
-    # LOOP
+    # GRAMMAR
+    # ========================================================
+
+    try:
+
+        grammar = (
+            build_vosk_grammar()
+        )
+
+    except Exception as exc:
+
+        print(
+            "[VOLK] "
+            "ERRORE costruzione grammatica: "
+            f"{exc}"
+        )
+
+        return
+
+    if len(grammar) <= 1:
+
+        print(
+            "[VOLK] "
+            "ERRORE grammatica vuota"
+        )
+
+        return
+
+    # ========================================================
+    # RECOGNIZER
+    # ========================================================
+
+    try:
+
+        recognizer = create_recognizer(
+            model,
+            grammar
+        )
+
+    except Exception as exc:
+
+        print(
+            "[VOLK] "
+            "ERRORE creazione recognizer: "
+            f"{exc}"
+        )
+
+        return
+
+    print(
+        "[VOLK] Recognizer pronto"
+    )
+
+    # ========================================================
+    # READY
+    # ========================================================
+
+    if ready_event is not None:
+
+        ready_event.set()
+
+    print(
+        "[VOLK] "
+        "Pronto all'ascolto"
+    )
+
+    # ========================================================
+    # MAIN LOOP
     # ========================================================
 
     while not stop_event.is_set():
@@ -156,111 +617,91 @@ def vosk_listener(
             )
 
         except Empty:
+
             continue
 
         except Exception as exc:
 
             print(
-                "[VOLK] Errore lettura audio_queue: "
+                "[VOLK] "
+                "Errore lettura audio_queue: "
                 f"{exc}"
             )
 
             continue
 
-        # ====================================================
-        # VALIDAZIONE BUFFER
-        # ====================================================
-
-        if not audio_buffer:
-            continue
-
         try:
+
+            # =================================================
+            # EMPTY BUFFER
+            # =================================================
+
+            if not audio_buffer:
+
+                print(
+                    "[VOLK] Buffer audio vuoto"
+                )
+
+                continue
+
+            # =================================================
+            # AUDIO PREPARATION
+            # =================================================
 
             audio_array = prepare_audio(
                 audio_buffer,
                 sample_rate
             )
 
-        except Exception as exc:
+            if audio_array.size == 0:
 
-            print(
-                "[VOLK] ERRORE preparazione audio: "
-                f"{exc}"
+                print(
+                    "[VOLK] Audio vuoto "
+                    "dopo preparazione"
+                )
+
+                continue
+
+            duration = (
+                len(audio_array)
+                / VOSK_SAMPLE_RATE
             )
 
-            continue
+            print(
+                "[VOLK] "
+                f"Elaborazione audio: "
+                f"{duration:.2f}s"
+            )
 
-        if audio_array.size == 0:
-            continue
-
-        duration = (
-            len(audio_array)
-            / VOSK_SAMPLE_RATE
-        )
-
-        print(
-            "[VOLK] "
-            f"Elaborazione audio: {duration:.2f}s"
-        )
-
-        # ====================================================
-        # PCM BYTES
-        # ====================================================
-
-        try:
+            # =================================================
+            # PCM
+            # =================================================
 
             pcm_bytes = (
                 audio_array.tobytes()
             )
 
-        except Exception as exc:
+            # =================================================
+            # RESET RECOGNIZER
+            # =================================================
 
-            print(
-                "[VOLK] ERRORE conversione PCM: "
-                f"{exc}"
+            recognizer.Reset()
+
+            # =================================================
+            # DECODE
+            # =================================================
+
+            start_time = (
+                time.monotonic()
             )
-
-            continue
-
-        # ====================================================
-        # NUOVO RECOGNIZER PER OGNI COMANDO
-        # ====================================================
-
-        recognizer = vosk.KaldiRecognizer(
-            model,
-            VOSK_SAMPLE_RATE
-        )
-
-        start_time = time.monotonic()
-
-        try:
-
-            # Passiamo TUTTO il comando al recognizer.
-            #
-            # Non ci interessa se AcceptWaveform restituisce
-            # True o False: il buffer è già stato delimitato
-            # dal nostro VAD.
 
             recognizer.AcceptWaveform(
                 pcm_bytes
             )
 
-            # =================================================
-            # FINAL RESULT
-            # =================================================
-
-            result_json = (
-                recognizer.FinalResult()
+            text = get_final_text(
+                recognizer
             )
-
-            result = json.loads(
-                result_json
-            )
-
-            text = result.get(
-                "text",
-                ""
-            ).strip()
 
             elapsed = (
                 time.monotonic()
@@ -268,7 +709,7 @@ def vosk_listener(
             )
 
             # =================================================
-            # NESSUN TESTO
+            # EMPTY RESULT
             # =================================================
 
             if not text:
@@ -276,25 +717,58 @@ def vosk_listener(
                 print(
                     "[VOLK] "
                     "Nessun comando riconosciuto "
-                    f"[decode: {elapsed:.3f}s]"
+                    f"[decode: "
+                    f"{elapsed:.3f}s]"
                 )
 
                 continue
 
             # =================================================
-            # RISULTATO FINALE
+            # UNKNOWN
+            # =================================================
+
+            if text == UNKNOWN_TOKEN:
+
+                print(
+                    "[VOLK] "
+                    "Audio fuori grammatica "
+                    f"[decode: "
+                    f"{elapsed:.3f}s]"
+                )
+
+                continue
+
+            # Vosk può produrre [unk] insieme ad altre parole.
+            if UNKNOWN_TOKEN in text:
+
+                print(
+                    "[VOLK] "
+                    "Comando parzialmente sconosciuto: "
+                    f"{text}"
+                )
+
+                text = text.replace(
+                    UNKNOWN_TOKEN,
+                    ""
+                ).strip()
+
+                if not text:
+                    continue
+
+            # =================================================
+            # FINAL COMMAND
             # =================================================
 
             print(
                 "[VOLK] "
-                f"Comando finale trascritto: "
+                "Comando finale trascritto: "
                 f"{text} "
-                f"[Vosk decode time: "
+                "[Vosk decode time: "
                 f"{elapsed:.3f}s]"
             )
 
             # =================================================
-            # INVIO AL FUZZY
+            # SEND TO FUZZY
             # =================================================
 
             if command_queue is not None:
@@ -305,14 +779,15 @@ def vosk_listener(
 
                 print(
                     "[VOLK] "
-                    "Comando inviato al fuzzy parser"
+                    "Comando inviato "
+                    "al fuzzy parser"
                 )
 
         except json.JSONDecodeError as exc:
 
             print(
                 "[VOLK] "
-                f"ERRORE parsing risultato Vosk: "
+                "ERRORE parsing JSON Vosk: "
                 f"{exc}"
             )
 
@@ -320,12 +795,20 @@ def vosk_listener(
 
             print(
                 "[VOLK] "
-                f"ERRORE riconoscimento: "
+                "ERRORE riconoscimento: "
                 f"{exc}"
             )
 
+        finally:
+
+            try:
+                audio_queue.task_done()
+
+            except Exception:
+                pass
+
     # ========================================================
-    # THREAD TERMINATO
+    # STOP
     # ========================================================
 
     print(
