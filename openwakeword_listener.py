@@ -431,7 +431,7 @@ def openwakeword_listener(
                 )
                 print()
 
-                play_beep()
+                #play_beep()
 
                 # Reset stato registrazione
                 audio_buffer.clear()

@@ -1,0 +1,22 @@
+[Unit]
+Description=KeyVoice Voice Assistant
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=katone
+Group=katone
+
+WorkingDirectory=/home/homeassistant/KeyVoice
+
+ExecStart=/home/homeassistant/KeyVoice/keyvoiceenv/bin/python3 /home/homeassistant/KeyVoice/run_service.py
+
+Restart=always
+RestartSec=3
+
+Environment=PYTHONUNBUFFERED=1
+Environment=HOME=/home/homeassistant
+
+[Install]
+WantedBy=multi-user.target
