@@ -224,3 +224,70 @@ amixer cset numid=1 62259
 62259 è circa il 95% di 65536.
 
 vedi il log del service
+
+
+#####
+nuova card
+cat /proc/asound/cards
+0 [vc4hdmi0 ]: vc4-hdmi - vc4-hdmi-0 vc4-hdmi-0 1 [vc4hdmi1 ]: vc4-hdmi - vc4-hdmi-1 vc4-hdmi-1 2 [Array ]: USB-Audio - reSpeaker XVF3800 4-Mic Array Seeed Studio reSpeaker XVF3800 4-Mic Array at usb-xhci-hcd.1-1, high speed 4 [S4 ]: USB-Audio - Sound Blaster Play! 4 Generic Sound Blaster Play! 4 at usb-xhci-hcd.1-2, high speed
+
+Adesso facciamo un passaggio fondamentale prima di modificare KeyVoice: dobbiamo vedere quanti canali e quali sample rate espone realmente il XVF3800.
+
+1. Esegui
+   arecord -D hw:2,0 --dump-hw-params /dev/null
+
+
+Warning: Some sources (like microphones) may produce inaudible results
+with 8-bit sampling. Use '-f' argument to increase resolution
+e.g. '-f S16_LE'.
+Recording WAVE '/dev/null' : Unsigned 8 bit, Rate 8000 Hz, Mono
+HW Params of device "hw:2,0":
+--------------------
+ACCESS:  MMAP_INTERLEAVED RW_INTERLEAVED
+FORMAT:  S16_LE
+SUBFORMAT:  STD
+SAMPLE_BITS: 16
+FRAME_BITS: 32
+CHANNELS: 2
+RATE: 16000
+PERIOD_TIME: [1000 1000000]
+PERIOD_SIZE: [16 16000]
+PERIOD_BYTES: [64 64000]
+PERIODS: [2 1024]
+BUFFER_TIME: [2000 2000000]
+BUFFER_SIZE: [32 32000]
+BUFFER_BYTES: [128 128000]
+TICK_TIME: ALL
+--------------------
+arecord: set_params:1352: Sample format non available
+Available formats:
+- S16_LE
+
+Configurazione rilevata
+
+Il device:
+
+hw:2,0
+
+espone solo:
+
+FORMAT:   S16_LE
+CHANNELS: 2
+RATE:     16000
+
+Quindi abbiamo:
+
+XVF3800
+│
+├── 16 bit
+├── 16 kHz
+└── 2 canali
+
+devo capire quale canale e asr
+arecord -D hw:1,0 -f S16_LE -r 16000 -c 2 -d 5 xvf3800_test.wav
+
+quello che si sente meglio è asr
+ffmpeg -i xvf3800_test.wav -map_channel 0.0.0 channel0.wav
+ffmpeg -i xvf3800_test.wav -map_channel 0.0.0 channel0.wav
+
+

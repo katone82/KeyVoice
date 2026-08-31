@@ -9,7 +9,6 @@ from typing import List
 import numpy as np
 import sounddevice as sd
 import webrtcvad
-from scipy.signal import resample_poly
 
 from openwakeword.model import Model
 
@@ -18,27 +17,40 @@ from openwakeword.model import Model
 # AUDIO CONFIGURATION
 # ============================================================
 
+# OpenWakeWord / Vosk lavorano a 16 kHz.
 TARGET_SAMPLE_RATE = 16_000
 
-# La Sound Blaster Play! 4 lavora bene a 48 kHz.
-DEVICE_SAMPLE_RATE = 48_000
+# ReSpeaker XVF3800:
+#   S16_LE
+#   16 kHz
+#   2 canali
+DEVICE_SAMPLE_RATE = 16_000
 
-CHANNELS = 1
+# Il dispositivo espone 2 canali.
+# Useremo esclusivamente Channel 0.
+CHANNELS = 2
+
 AUDIO_DTYPE = "int16"
 
 # 80 ms a 16 kHz
 OWW_FRAME_LENGTH = 1_280
 
-# 80 ms a 48 kHz
-DEVICE_FRAME_LENGTH = OWW_FRAME_LENGTH * 3
+# Anche il device lavora a 16 kHz,
+# quindi non serve moltiplicare per 3.
+DEVICE_FRAME_LENGTH = OWW_FRAME_LENGTH
 
 
 # ============================================================
 # SOUNDDEVICE
 # ============================================================
 
-# Cerchiamo il dispositivo per nome e NON per indice.
-INPUT_DEVICE_NAME = "Sound Blaster Play! 4"
+# ReSpeaker XVF3800 come UNICO dispositivo di input.
+#
+# NON usare più:
+#   Sound Blaster Play! 4
+#
+INPUT_DEVICE_NAME = "reSpeaker XVF3800 4-Mic Array"
+
 
 # Massimo numero di chunk audio tenuti in attesa.
 AUDIO_QUEUE_MAXSIZE = 50
@@ -59,17 +71,28 @@ STATE_COOLDOWN = "cooldown"
 # ============================================================
 
 BEEP_FILE = "/home/homeassistant/KeyVoice/sounds/wake.wav"
-BEEP_DEVICE = "plughw:3,0"
+
+# Sound Blaster Play! 4.
+#
+# Verificato con:
+#
+#   aplay -D plughw:4,0 xvf3800_test.wav
+#
+BEEP_DEVICE = "plughw:4,0"
 
 
 def play_beep() -> None:
+
     if not os.path.exists(BEEP_FILE):
+
         print(
             f"[BEEP] File non trovato: {BEEP_FILE}"
         )
+
         return
 
     try:
+
         subprocess.run(
             [
                 "aplay",
@@ -85,11 +108,13 @@ def play_beep() -> None:
         )
 
     except subprocess.TimeoutExpired:
+
         print(
             "[BEEP] Timeout riproduzione"
         )
 
     except Exception as exc:
+
         print(
             f"[BEEP] Errore: {exc}"
         )
@@ -139,6 +164,7 @@ def find_input_device(
             device.get("max_input_channels", 0) > 0
             and wanted in device["name"].lower()
         ):
+
             print(
                 "[AUDIO] Microfono selezionato: "
                 f"{index} - {device['name']}"
@@ -149,35 +175,6 @@ def find_input_device(
     raise RuntimeError(
         f"Dispositivo audio non trovato: {device_name}"
     )
-
-
-# ============================================================
-# AUDIO CONVERSION
-# ============================================================
-
-def convert_48k_to_16k(
-    audio_48k: np.ndarray
-) -> np.ndarray:
-    """
-    Converte int16 mono:
-
-        48 kHz -> 16 kHz
-    """
-
-    if audio_48k.ndim > 1:
-        audio_48k = audio_48k[:, 0]
-
-    audio_16k = resample_poly(
-        audio_48k.astype(np.float32),
-        up=1,
-        down=3
-    )
-
-    return np.clip(
-        audio_16k,
-        -32768,
-        32767
-    ).astype(np.int16)
 
 
 # ============================================================
@@ -216,7 +213,9 @@ def save_debug_audio(
     ) as wav_file:
 
         wav_file.setnchannels(1)
+
         wav_file.setsampwidth(2)
+
         wav_file.setframerate(
             sample_rate
         )
@@ -348,6 +347,7 @@ def openwakeword_listener(
         )
 
         stop_event.set()
+
         return
 
     # ========================================================
@@ -373,6 +373,7 @@ def openwakeword_listener(
     #
     # Questa coda è SOLO tra callback sounddevice
     # e listener openWakeWord.
+    #
     # Non è la audio_queue destinata a Vosk.
     # ========================================================
 
@@ -405,16 +406,22 @@ def openwakeword_listener(
         """
         Callback PortAudio.
 
-        Deve essere velocissima:
-        copia il frame e lo mette nella coda.
+        ReSpeaker XVF3800:
 
-        Nessun openWakeWord/VAD/Vosk viene eseguito qui.
+            Channel 0 = audio ASR pulito
+            Channel 1 = secondo canale
+
+        KeyVoice utilizza esclusivamente Channel 0.
+
+        Il callback deve essere velocissimo:
+        nessun VAD / OpenWakeWord / Vosk qui.
         """
 
         nonlocal last_audio_callback
         nonlocal callback_count
 
         if status:
+
             print(
                 f"[AUDIO] Callback status: {status}"
             )
@@ -427,8 +434,40 @@ def openwakeword_listener(
 
             callback_count += 1
 
+        # ====================================================
+        # VALIDAZIONE INPUT
+        # ====================================================
+
+        if (
+            indata.ndim != 2
+            or indata.shape[1] < 2
+        ):
+
+            print(
+                "[AUDIO] Formato inatteso: "
+                f"shape={indata.shape}"
+            )
+
+            return
+
+        # ====================================================
+        # CHANNEL 0
+        # ====================================================
+
+        # Channel 0 = audio ASR pulito del XVF3800.
+        #
+        # Da:
+        #
+        #   [frame][channel]
+        #
+        # prendiamo:
+        #
+        #   [frame][0]
+        #
+        # ottenendo un array mono.
+
         chunk = np.array(
-            indata,
+            indata[:, 0],
             dtype=np.int16,
             copy=True
         )
@@ -441,20 +480,25 @@ def openwakeword_listener(
 
         except queue.Full:
 
-            # Se per qualche motivo il consumer rallenta,
+            # Se il consumer rallenta,
             # scartiamo il frame più vecchio.
+
             try:
+
                 mic_queue.get_nowait()
 
             except queue.Empty:
+
                 pass
 
             try:
+
                 mic_queue.put_nowait(
                     chunk
                 )
 
             except queue.Full:
+
                 pass
 
     # ========================================================
@@ -494,6 +538,16 @@ def openwakeword_listener(
             f"{TARGET_SAMPLE_RATE} Hz"
         )
 
+        print(
+            "[AUDIO] Channels: "
+            f"{CHANNELS}"
+        )
+
+        print(
+            "[AUDIO] Active channel: "
+            "Channel 0"
+        )
+
     except Exception as exc:
 
         print(
@@ -502,6 +556,7 @@ def openwakeword_listener(
         )
 
         stop_event.set()
+
         return
 
     # ========================================================
@@ -515,9 +570,11 @@ def openwakeword_listener(
         while True:
 
             try:
+
                 mic_queue.get_nowait()
 
             except queue.Empty:
+
                 return
 
     def start_audio_stream() -> None:
@@ -528,15 +585,19 @@ def openwakeword_listener(
         if stream is not None:
 
             try:
+
                 stream.stop()
 
             except Exception:
+
                 pass
 
             try:
+
                 stream.close()
 
             except Exception:
+
                 pass
 
             stream = None
@@ -575,12 +636,15 @@ def openwakeword_listener(
         nonlocal stream
 
         print()
+
         print(
             "[AUDIO] =============================="
         )
+
         print(
             f"[AUDIO] Riavvio stream: {reason}"
         )
+
         print(
             "[AUDIO] =============================="
         )
@@ -590,15 +654,19 @@ def openwakeword_listener(
             if stream is not None:
 
                 try:
+
                     stream.abort()
 
                 except Exception:
+
                     pass
 
                 try:
+
                     stream.close()
 
                 except Exception:
+
                     pass
 
                 stream = None
@@ -638,6 +706,7 @@ def openwakeword_listener(
         )
 
         stop_event.set()
+
         return
 
     # ========================================================
@@ -647,11 +716,15 @@ def openwakeword_listener(
     state = STATE_LISTENING
 
     audio_buffer: List[int] = []
+
     vad_buffer: List[int] = []
 
     wait_command_start = None
+
     command_start_time = None
+
     last_voice_time = None
+
     cooldown_until = None
 
     # ========================================================
@@ -661,6 +734,7 @@ def openwakeword_listener(
     def clear_command_buffers() -> None:
 
         audio_buffer.clear()
+
         vad_buffer.clear()
 
     def enter_listening(
@@ -668,6 +742,7 @@ def openwakeword_listener(
     ) -> None:
 
         nonlocal state
+
         nonlocal wait_command_start
         nonlocal command_start_time
         nonlocal last_voice_time
@@ -676,8 +751,11 @@ def openwakeword_listener(
         clear_command_buffers()
 
         wait_command_start = None
+
         command_start_time = None
+
         last_voice_time = None
+
         cooldown_until = None
 
         state = STATE_LISTENING
@@ -702,6 +780,7 @@ def openwakeword_listener(
     ) -> None:
 
         nonlocal state
+
         nonlocal wait_command_start
         nonlocal command_start_time
         nonlocal last_voice_time
@@ -710,7 +789,9 @@ def openwakeword_listener(
         clear_command_buffers()
 
         wait_command_start = None
+
         command_start_time = None
+
         last_voice_time = None
 
         cooldown_until = (
@@ -767,6 +848,7 @@ def openwakeword_listener(
                 is_speech = True
 
             if is_speech:
+
                 speech_detected = True
 
         return speech_detected
@@ -779,14 +861,18 @@ def openwakeword_listener(
         """
         Attende al massimo 250 ms.
 
-        Questo è fondamentale:
-        non abbiamo più una read() che può bloccarsi
-        indefinitamente.
+        Il XVF3800 fornisce già:
+
+            16 kHz
+            S16_LE
+            Channel 0
+
+        Non viene effettuato alcun resampling.
         """
 
         try:
 
-            audio_48k = mic_queue.get(
+            audio_16k = mic_queue.get(
                 timeout=0.25
             )
 
@@ -794,9 +880,7 @@ def openwakeword_listener(
 
             return None
 
-        return convert_48k_to_16k(
-            audio_48k
-        )
+        return audio_16k
 
     # ========================================================
     # INITIAL STATE
@@ -843,6 +927,7 @@ def openwakeword_listener(
                 ):
 
                     stop_event.set()
+
                     break
 
                 enter_listening(
@@ -858,6 +943,7 @@ def openwakeword_listener(
             pcm_np = get_next_audio_chunk()
 
             if pcm_np is None:
+
                 continue
 
             now = time.monotonic()
@@ -917,6 +1003,7 @@ def openwakeword_listener(
                     )
 
                 if score < threshold:
+
                     continue
 
                 print()
@@ -967,6 +1054,7 @@ def openwakeword_listener(
                 if voice_detected:
 
                     command_start_time = now
+
                     last_voice_time = now
 
                     state = STATE_RECORDING
@@ -1113,14 +1201,19 @@ def openwakeword_listener(
                     )
 
                     if pcm_post is None:
+
                         continue
 
-                    # openWakeWord continua ad avanzare
+                    # OpenWakeWord continua ad avanzare.
+
                     try:
+
                         model.predict(
                             pcm_post
                         )
+
                     except Exception:
+
                         pass
 
                     post_buffer.extend(
@@ -1236,11 +1329,17 @@ def openwakeword_listener(
         if stream is not None:
 
             try:
+
                 stream.abort()
+
             except Exception:
+
                 pass
 
             try:
+
                 stream.close()
+
             except Exception:
+
                 pass
