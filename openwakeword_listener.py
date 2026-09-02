@@ -32,8 +32,8 @@ CHANNELS = 2
 
 AUDIO_DTYPE = "int16"
 
-# 80 ms a 16 kHz
-OWW_FRAME_LENGTH = 1_280
+# 40 ms a 16 kHz
+OWW_FRAME_LENGTH = 640
 
 # Anche il device lavora a 16 kHz,
 # quindi non serve moltiplicare per 3.
