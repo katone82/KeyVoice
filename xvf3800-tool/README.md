@@ -1,50 +1,36 @@
 # xvf3800-tool
 
-Standalone XVF3800 tool for Raspberry Pi, independent from KeyVoice.
+Standalone test/configuration tool for ReSpeaker XVF3800 USB 4-Mic Array.
 
-Based directly on the official reSpeaker `python_control/xvf_host.py` interface. The official host exposes firmware information, DoA, speech-energy telemetry and writable DSP parameters; configuration can be saved to flash.
+## Required vendor file
 
-## Install
+Copy the official `python_control/xvf_host.py` from:
+`https://github.com/respeaker/reSpeaker_XVF3800_USB_4MIC_ARRAY`
+into `vendor/xvf_host.py`.
 
-```bash
-./install.sh
-```
-
-Then copy the official `python_control/xvf_host.py` to `vendor/xvf_host.py`.
-
-## First tests
+## Commands
 
 ```bash
 sudo .venv/bin/python xvf3800_tool.py status
+sudo .venv/bin/python xvf3800_tool.py dump
+sudo .venv/bin/python xvf3800_tool.py backup
 sudo .venv/bin/python xvf3800_tool.py telemetry
 sudo .venv/bin/python xvf3800_tool.py monitor
-```
-
-## Initial voice profile
-
-Apply without persistence first:
-
-```bash
+sudo .venv/bin/python xvf3800_tool.py audio
 sudo .venv/bin/python xvf3800_tool.py configure
-```
-
-If the tests are good, persist:
-
-```bash
 sudo .venv/bin/python xvf3800_tool.py configure --save
 ```
 
-Profile: AGC ON, limiter ON, echo suppression ON, non-linear echo attenuation ON, additional attenuation during non-speech ON, microphone HPF 125 Hz.
+### Real test
 
-Noise-suppression floors and echo-strength/double-talk parameters are deliberately not forced until we measure the real room. The official host map documents `PP_MIN_NS`, `PP_MIN_NN`, `PP_GAMMA_*` and `PP_DTSENSITIVE` and their trade-offs.
-
-## USB audio
-
-Use ALSA separately:
+First run `audio` and identify the XVF3800 ALSA device. Then:
 
 ```bash
-arecord -l
-arecord --dump-hw-params -D hw:X,Y
+sudo .venv/bin/python xvf3800_tool.py test --device hw:X,0 --seconds 20 --channels 2
 ```
 
-The control interface and USB audio stream are separate; this tool focuses on DSP control/telemetry.
+The test creates a timestamped directory under `recordings/` containing:
+- `xvf3800.wav` raw USB audio
+- `telemetry.csv` synchronized DoA/speech-energy telemetry
+
+Do not use `configure --save` until the initial profile has been tested.

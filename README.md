@@ -290,4 +290,29 @@ quello che si sente meglio è asr
 ffmpeg -i xvf3800_test.wav -map_channel 0.0.0 channel0.wav
 ffmpeg -i xvf3800_test.wav -map_channel 0.0.0 channel0.wav
 
+######### test respeaker
+cd xvf3800-tool
+chmod +x install.sh
+./install.sh
 
+Poi copia il xvf_host.py ufficiale in:
+
+xvf3800-tool/vendor/xvf_host.py
+
+e facciamo:
+
+sudo .venv/bin/python xvf3800_tool.py status
+
+
+sono rimasto a monitor segnali
+
+
+
+##custom params
+sudo .venv/bin/python xvf3800_tool.py telemetry
+ReadCMD: cmdid: 203, resid: 33, payload: [0, 142, 14, 33, 64, 83, 121, 171, 64, 95, 22, 14, 64, 142, 14, 33, 64]
+AEC_AZIMUTH_VALUES             (2.5165133476257324, 5.358560085296631, 2.2201154232025146, 2.5165133476257324)
+ReadCMD: cmdid: 208, resid: 33, payload: [0, 250, 152, 196, 71, 0, 0, 0, 0, 136, 5, 118, 70, 250, 152, 196, 71]
+AEC_SPENERGY_VALUES            (100657.953125, 0.0, 15745.3828125, 100657.953125)
+DoA degrees: [144.2, 307.0, 127.2, 144.2]
+Speech: [True, False, True, True]
