@@ -2,294 +2,263 @@ views:
   - path: default_view
     title: Luci
     icon: mdi:lightbulb-group
-    type: masonry
-
-    cards:
-
-      # ═══════════════════════════════════════
-      # 🛋️ SALONE
-      # ═══════════════════════════════════════
-
-      - type: custom:stack-in-card
-
-        card_mod:
-          style: |
-            ha-card {
-              background: rgba(255, 193, 7, 0.10);
-              border: 1px solid rgba(255, 193, 7, 0.45);
-              border-radius: 24px;
-              box-shadow: 0 0 25px rgba(255, 193, 7, 0.15);
-              backdrop-filter: blur(12px);
-              -webkit-backdrop-filter: blur(12px);
-              overflow: hidden;
-            }
-
+    type: sections
+    max_columns: 4
+    sections:
+      - type: grid
         cards:
-
-          # HEADER SALONE
-          - type: custom:mushroom-template-card
-            primary: "🛋️ SALONE"
-            secondary: ""
-            icon: mdi:sofa
-            layout: horizontal
-            fill_container: true
-
+          - type: custom:stack-in-card
+            grid_options:
+              columns: 12
+              rows: auto
             card_mod:
               style: |
                 ha-card {
-                  background: rgba(255, 193, 7, 0.16);
-                  border: none;
-                  border-radius: 0;
-                  box-shadow: none;
+                  background: rgba(255, 193, 7, 0.10);
+                  border: 1px solid rgba(255, 193, 7, 0.45);
+                  border-radius: 24px;
+                  box-shadow: 0 0 25px rgba(255, 193, 7, 0.15);
+                  backdrop-filter: blur(12px);
+                  -webkit-backdrop-filter: blur(12px);
+                  overflow: hidden;
                 }
+            cards:
+              - type: custom:mushroom-template-card
+                primary: 🛋️ SALONE
+                secondary: ''
+                icon: mdi:sofa
+                layout: horizontal
+                fill_container: true
+                card_mod:
+                  style: |
+                    ha-card {
+                      background: rgba(255, 193, 7, 0.16);
+                      border: none;
+                      border-radius: 0;
+                      box-shadow: none;
+                    }
 
-                mushroom-shape-icon {
-                  --shape-color: rgba(255, 193, 7, 0.25) !important;
-                }
-
-          # LIBRERIA (featured, resta come light-card grande)
-          - type: custom:mushroom-light-card
-            entity: light.luce_libreria
-            name: Libreria
-            icon: mdi:bookshelf
-            show_brightness_control: true
-            show_color_temp_control: false
-            show_color_control: false
-            collapsible_controls: true
-            fill_container: true
-            layout: horizontal
-            secondary_info: state
-
+                    mushroom-shape-icon {
+                      --shape-color: rgba(255, 193, 7, 0.25) !important;
+                    }
+              - type: custom:mushroom-light-card
+                entity: light.luce_libreria
+                name: Libreria
+                icon: mdi:bookshelf
+                show_brightness_control: true
+                show_color_temp_control: false
+                show_color_control: false
+                collapsible_controls: true
+                fill_container: true
+                layout: horizontal
+                secondary_info: state
+                card_mod:
+                  style: |
+                    ha-card {
+                      background: transparent;
+                      border: none;
+                      border-radius: 0;
+                      box-shadow: none;
+                    }
+              - type: custom:auto-entities
+                show_empty: false
+                card_param: cards
+                card:
+                  type: grid
+                  columns: 2
+                  square: false
+                filter:
+                  include:
+                    - area: Salone
+                      options:
+                        type: tile
+                        tap_action:
+                          action: toggle
+                        hold_action:
+                          action: more-info
+                  exclude:
+                    - entity_id: light.luce_libreria
+                sort:
+                  method: friendly_name
+                  ignore_case: true
+          - type: custom:stack-in-card
+            grid_options:
+              columns: 12
+              rows: auto
             card_mod:
               style: |
                 ha-card {
-                  background: transparent;
-                  border: none;
-                  border-radius: 0;
-                  box-shadow: none;
+                  background: rgba(103, 58, 183, 0.10);
+                  border: 1px solid rgba(103, 58, 183, 0.45);
+                  border-radius: 24px;
+                  box-shadow: 0 0 25px rgba(103, 58, 183, 0.18);
+                  backdrop-filter: blur(12px);
+                  -webkit-backdrop-filter: blur(12px);
+                  overflow: hidden;
                 }
+            cards:
+              - type: custom:mushroom-template-card
+                primary: 🌙 NOTTE
+                secondary: ''
+                icon: mdi:weather-night
+                layout: horizontal
+                fill_container: true
+                card_mod:
+                  style: |
+                    ha-card {
+                      background: rgba(103, 58, 183, 0.16);
+                      border: none;
+                      border-radius: 0;
+                      box-shadow: none;
+                    }
 
-          # TUTTE LE ALTRE ENTITÀ SALONE - PULSANTI
-          - type: custom:auto-entities
-            show_empty: false
-            card_param: cards
-            card:
-              type: grid
-              columns: 2
-              square: false
-
-            filter:
-              include:
-                - area: Salone
-                  options:
-                    type: tile
-              exclude:
-                - entity_id: light.luce_libreria
-
-            sort:
-              method: friendly_name
-              ignore_case: true
-
-
-      # ═══════════════════════════════════════
-      # 🍳 CUCINA
-      # ═══════════════════════════════════════
-
-      - type: custom:stack-in-card
-
-        card_mod:
-          style: |
-            ha-card {
-              background: rgba(255, 112, 67, 0.10);
-              border: 1px solid rgba(255, 112, 67, 0.45);
-              border-radius: 24px;
-              box-shadow: 0 0 25px rgba(255, 112, 67, 0.15);
-              backdrop-filter: blur(12px);
-              -webkit-backdrop-filter: blur(12px);
-              overflow: hidden;
-            }
-
-        cards:
-
-          - type: custom:mushroom-template-card
-            primary: "🍳 CUCINA"
-            secondary: ""
-            icon: mdi:chef-hat
-            layout: horizontal
-            fill_container: true
-
+                    mushroom-shape-icon {
+                      --shape-color: rgba(103, 58, 183, 0.25) !important;
+                    }
+              - type: custom:mushroom-light-card
+                entity: light.led_corridoio
+                name: LED Corridoio
+                icon: mdi:led-strip-variant
+                show_brightness_control: true
+                show_color_temp_control: false
+                show_color_control: false
+                collapsible_controls: true
+                fill_container: true
+                layout: horizontal
+                secondary_info: state
+                card_mod:
+                  style: |
+                    ha-card {
+                      background: transparent;
+                      border: none;
+                      border-radius: 0;
+                      box-shadow: none;
+                    }
+              - type: custom:auto-entities
+                show_empty: false
+                card_param: cards
+                card:
+                  type: grid
+                  columns: 2
+                  square: false
+                filter:
+                  include:
+                    - area: Notte
+                      options:
+                        type: tile
+                        tap_action:
+                          action: toggle
+                        hold_action:
+                          action: more-info
+                  exclude:
+                    - entity_id: light.led_corridoio
+                sort:
+                  method: friendly_name
+                  ignore_case: true
+          - type: custom:stack-in-card
+            grid_options:
+              columns: 6
+              rows: auto
             card_mod:
               style: |
                 ha-card {
-                  background: rgba(255, 112, 67, 0.16);
-                  border: none;
-                  border-radius: 0;
-                  box-shadow: none;
+                  background: rgba(255, 112, 67, 0.10);
+                  border: 1px solid rgba(255, 112, 67, 0.45);
+                  border-radius: 24px;
+                  box-shadow: 0 0 25px rgba(255, 112, 67, 0.15);
+                  backdrop-filter: blur(12px);
+                  -webkit-backdrop-filter: blur(12px);
+                  overflow: hidden;
                 }
+            cards:
+              - type: custom:mushroom-template-card
+                primary: 🍳 CUCINA
+                secondary: ''
+                icon: mdi:chef-hat
+                layout: horizontal
+                fill_container: true
+                card_mod:
+                  style: |
+                    ha-card {
+                      background: rgba(255, 112, 67, 0.16);
+                      border: none;
+                      border-radius: 0;
+                      box-shadow: none;
+                    }
 
-                mushroom-shape-icon {
-                  --shape-color: rgba(255, 112, 67, 0.25) !important;
-                }
-
-          # TUTTE LE ENTITÀ CUCINA - PULSANTI
-          - type: custom:auto-entities
-            show_empty: false
-            card_param: cards
-            card:
-              type: grid
-              columns: 2
-              square: false
-
-            filter:
-              include:
-                - area: Cucina
-                  options:
-                    type: tile
-
-            sort:
-              method: friendly_name
-              ignore_case: true
-
-
-      # ═══════════════════════════════════════
-      # 🌙 NOTTE
-      # ═══════════════════════════════════════
-
-      - type: custom:stack-in-card
-
-        card_mod:
-          style: |
-            ha-card {
-              background: rgba(103, 58, 183, 0.10);
-              border: 1px solid rgba(103, 58, 183, 0.45);
-              border-radius: 24px;
-              box-shadow: 0 0 25px rgba(103, 58, 183, 0.18);
-              backdrop-filter: blur(12px);
-              -webkit-backdrop-filter: blur(12px);
-              overflow: hidden;
-            }
-
-        cards:
-
-          - type: custom:mushroom-template-card
-            primary: "🌙 NOTTE"
-            secondary: ""
-            icon: mdi:weather-night
-            layout: horizontal
-            fill_container: true
-
+                    mushroom-shape-icon {
+                      --shape-color: rgba(255, 112, 67, 0.25) !important;
+                    }
+              - type: custom:auto-entities
+                show_empty: false
+                card_param: cards
+                card:
+                  type: grid
+                  columns: 1
+                  square: false
+                filter:
+                  include:
+                    - area: Cucina
+                      options:
+                        type: tile
+                        tap_action:
+                          action: toggle
+                        hold_action:
+                          action: more-info
+                sort:
+                  method: friendly_name
+                  ignore_case: true
+          - type: custom:stack-in-card
+            grid_options:
+              columns: 12
+              rows: auto
             card_mod:
               style: |
                 ha-card {
-                  background: rgba(103, 58, 183, 0.16);
-                  border: none;
-                  border-radius: 0;
-                  box-shadow: none;
+                  background: rgba(76, 175, 80, 0.10);
+                  border: 1px solid rgba(76, 175, 80, 0.45);
+                  border-radius: 24px;
+                  box-shadow: 0 0 25px rgba(76, 175, 80, 0.16);
+                  backdrop-filter: blur(12px);
+                  -webkit-backdrop-filter: blur(12px);
+                  overflow: hidden;
                 }
+            cards:
+              - type: custom:mushroom-template-card
+                primary: 🌳 GIARDINO
+                secondary: ''
+                icon: mdi:tree
+                layout: horizontal
+                fill_container: true
+                card_mod:
+                  style: |
+                    ha-card {
+                      background: rgba(76, 175, 80, 0.16);
+                      border: none;
+                      border-radius: 0;
+                      box-shadow: none;
+                    }
 
-                mushroom-shape-icon {
-                  --shape-color: rgba(103, 58, 183, 0.25) !important;
-                }
-
-          # LED CORRIDOIO (featured, resta come light-card grande)
-          - type: custom:mushroom-light-card
-            entity: light.led_corridoio
-            name: LED Corridoio
-            icon: mdi:led-strip-variant
-            show_brightness_control: true
-            show_color_temp_control: false
-            show_color_control: false
-            collapsible_controls: true
-            fill_container: true
-            layout: horizontal
-            secondary_info: state
-
-            card_mod:
-              style: |
-                ha-card {
-                  background: transparent;
-                  border: none;
-                  border-radius: 0;
-                  box-shadow: none;
-                }
-
-          # TUTTE LE ALTRE ENTITÀ NOTTE - PULSANTI
-          - type: custom:auto-entities
-            show_empty: false
-            card_param: cards
-            card:
-              type: grid
-              columns: 2
-              square: false
-
-            filter:
-              include:
-                - area: Notte
-                  options:
-                    type: tile
-              exclude:
-                - entity_id: light.led_corridoio
-
-            sort:
-              method: friendly_name
-              ignore_case: true
-
-
-      # ═══════════════════════════════════════
-      # 🌳 GIARDINO
-      # ═══════════════════════════════════════
-
-      - type: custom:stack-in-card
-
-        card_mod:
-          style: |
-            ha-card {
-              background: rgba(76, 175, 80, 0.10);
-              border: 1px solid rgba(76, 175, 80, 0.45);
-              border-radius: 24px;
-              box-shadow: 0 0 25px rgba(76, 175, 80, 0.16);
-              backdrop-filter: blur(12px);
-              -webkit-backdrop-filter: blur(12px);
-              overflow: hidden;
-            }
-
-        cards:
-
-          - type: custom:mushroom-template-card
-            primary: "🌳 GIARDINO"
-            secondary: ""
-            icon: mdi:tree
-            layout: horizontal
-            fill_container: true
-
-            card_mod:
-              style: |
-                ha-card {
-                  background: rgba(76, 175, 80, 0.16);
-                  border: none;
-                  border-radius: 0;
-                  box-shadow: none;
-                }
-
-                mushroom-shape-icon {
-                  --shape-color: rgba(76, 175, 80, 0.25) !important;
-                }
-
-          # TUTTE LE ENTITÀ GIARDINO - PULSANTI
-          - type: custom:auto-entities
-            show_empty: false
-            card_param: cards
-            card:
-              type: grid
-              columns: 2
-              square: false
-
-            filter:
-              include:
-                - area: Giardino
-                  options:
-                    type: tile
-
-            sort:
-              method: friendly_name
-              ignore_case: true
+                    mushroom-shape-icon {
+                      --shape-color: rgba(76, 175, 80, 0.25) !important;
+                    }
+              - type: custom:auto-entities
+                show_empty: false
+                card_param: cards
+                card:
+                  type: grid
+                  columns: 2
+                  square: false
+                filter:
+                  include:
+                    - area: Giardino
+                      options:
+                        type: tile
+                        tap_action:
+                          action: toggle
+                        hold_action:
+                          action: more-info
+                sort:
+                  method: friendly_name
+                  ignore_case: true
+        column_span: 4

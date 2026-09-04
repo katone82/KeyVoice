@@ -1,0 +1,11 @@
+{
+  "profile": "voice-home",
+  "parameters": {
+    "PP_AGCONOFF": 1,
+    "PP_LIMITONOFF": 1,
+    "PP_ECHOONOFF": 1,
+    "PP_NLATTENONOFF": 1,
+    "PP_ATTNS_MODE": 1,
+    "AEC_HPFONOFF": 2
+  }
+}
