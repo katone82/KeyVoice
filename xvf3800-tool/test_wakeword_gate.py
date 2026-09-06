@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 
 import time
+import threading
 import queue
 import subprocess
+import collections
+import wave
 
 import numpy as np
 import sounddevice as sd
-import webrtcvad
-
 from openwakeword.model import Model
 
 
 # ============================================================
-# CONFIG
+# AUDIO
 # ============================================================
 
 TARGET_SAMPLE_RATE = 16000
@@ -23,64 +24,98 @@ CHANNELS = 2
 INPUT_DEVICE_NAME = "reSpeaker XVF3800 4-Mic Array"
 
 BLOCK_MS = 30
-BLOCK_SIZE = int(
-    TARGET_SAMPLE_RATE * BLOCK_MS / 1000
-)
+BLOCK_SIZE = int(TARGET_SAMPLE_RATE * BLOCK_MS / 1000)
 
-# ------------------------------------------------------------
-# Wake word
-# ------------------------------------------------------------
 
-WAKEWORD_THRESHOLD = 0.35
+# ============================================================
+# WAKE WORD
+# ============================================================
+
 WAKEWORD_MODEL = "hey_jarvis"
+WAKEWORD_THRESHOLD = 0.35
 
-# ------------------------------------------------------------
-# Command
-# ------------------------------------------------------------
+
+# ============================================================
+# SPEECH GATE
+# ============================================================
+
+# Rapporto RMS / noise floor necessario per considerare
+# un frame come possibile inizio della voce.
+SPEECH_START_RATIO = 2.5
+
+# Rapporto RMS / noise floor usato durante la registrazione.
+# Più basso per non perdere parti deboli della frase.
+SPEECH_END_RATIO = 1.5
+
+# Tempo minimo di voce continua prima di iniziare la registrazione.
+SPEECH_START_TIME = 0.12
+
+# Silenzio necessario per terminare il comando.
+SPEECH_END_TIME = 0.50
+
+# Audio mantenuto prima dell'inizio effettivo della voce.
+PRE_ROLL_SECONDS = 0.30
+
+
+# ============================================================
+# NOISE FLOOR
+# ============================================================
+
+# Calibrazione iniziale.
+NOISE_LEARN_SECONDS = 2.0
+
+# Numero di blocchi utilizzati per calcolare il noise floor.
+NOISE_WINDOW_SECONDS = 2.0
+
+# Durante il normale ascolto, un frame viene considerato
+# rumore solamente se non supera questa proporzione
+# rispetto al noise floor corrente.
+NOISE_MAX_RATIO = 1.5
+
+# Evita che il noise floor cambi troppo rapidamente.
+NOISE_UPDATE_ALPHA = 0.02
+
+
+# ============================================================
+# POST WAKEWORD
+# ============================================================
+
+# Tempo durante il quale ignoriamo completamente l'audio
+# dopo la wake word.
+#
+# Serve principalmente per eliminare:
+#
+#   wake word
+#   beep
+#   riverberi
+#   transienti
+#
+POST_WAKE_IGNORE_SECONDS = 0.40
+
+
+# ============================================================
+# COMMAND
+# ============================================================
 
 MAX_COMMAND_SECONDS = 6.0
 
-# ------------------------------------------------------------
-# Adaptive speech gate
-# ------------------------------------------------------------
+# Tempo massimo durante il quale aspettiamo che l'utente
+# inizi effettivamente a parlare dopo la wake word.
+WAIT_COMMAND_TIMEOUT = 4.0
 
-SPEECH_START_RATIO = 2.5
-SPEECH_END_RATIO = 1.5
 
-# La voce deve rimanere sopra START_RATIO
-# per almeno questo tempo prima di iniziare.
-SPEECH_START_TIME = 0.12
-
-# La voce deve rimanere sotto END_RATIO
-# per almeno questo tempo prima di terminare.
-SPEECH_END_TIME = 0.50
-
-# ------------------------------------------------------------
-# Noise floor
-# ------------------------------------------------------------
-
-NOISE_FLOOR_ALPHA = 0.02
-
-# ------------------------------------------------------------
-# Pre-roll
-# ------------------------------------------------------------
-
-PRE_ROLL_SECONDS = 0.30
-
-# ------------------------------------------------------------
-# Audio watchdog
-# ------------------------------------------------------------
+# ============================================================
+# AUDIO WATCHDOG
+# ============================================================
 
 AUDIO_WATCHDOG_SECONDS = 3.0
 
-# ------------------------------------------------------------
-# Beep
-# ------------------------------------------------------------
 
-BEEP_FILE = (
-    "/home/homeassistant/KeyVoice/sounds/wake.wav"
-)
+# ============================================================
+# BEEP
+# ============================================================
 
+BEEP_FILE = "/home/homeassistant/KeyVoice/sounds/wake.wav"
 BEEP_DEVICE = "plughw:4,0"
 
 
@@ -104,13 +139,16 @@ class AdaptiveSpeechGate:
 
         self.noise_floor = None
 
-    # --------------------------------------------------------
-    # RESET
-    # --------------------------------------------------------
+        self.samples = collections.deque(
+            maxlen=int(NOISE_WINDOW_SECONDS / (BLOCK_MS / 1000))
+        )
 
-    def reset(self):
+        self.calibration_samples = []
 
-        self.noise_floor = None
+        self.calibrating = True
+
+        self.calibration_start = time.monotonic()
+
 
     # --------------------------------------------------------
     # RMS
@@ -118,21 +156,57 @@ class AdaptiveSpeechGate:
 
     def rms(self, audio):
 
-        if audio is None or len(audio) == 0:
-
+        if len(audio) == 0:
             return 0.0
 
-        x = np.asarray(
-            audio,
-            dtype=np.float32
-        )
+        x = audio.astype(np.float32)
 
         return float(
             np.sqrt(
-                np.mean(x * x)
-                + 1e-12
+                np.mean(x * x) + 1e-12
             )
         )
+
+
+    # --------------------------------------------------------
+    # CALIBRATION
+    # --------------------------------------------------------
+
+    def calibration_update(self, rms):
+
+        if rms <= 0:
+            return False
+
+        self.calibration_samples.append(rms)
+
+        elapsed = time.monotonic() - self.calibration_start
+
+        if elapsed >= NOISE_LEARN_SECONDS:
+
+            if self.calibration_samples:
+
+                # Mediana = molto più resistente ai picchi
+                # rispetto alla semplice media.
+                self.noise_floor = float(
+                    np.median(self.calibration_samples)
+                )
+
+            else:
+
+                self.noise_floor = rms
+
+            self.calibrating = False
+
+            print()
+            print(
+                f"[CAL] Noise floor iniziale: "
+                f"{self.noise_floor:.1f}"
+            )
+
+            return True
+
+        return False
+
 
     # --------------------------------------------------------
     # UPDATE NOISE
@@ -141,26 +215,44 @@ class AdaptiveSpeechGate:
     def update_noise(self, rms):
 
         if rms <= 0:
-
             return
-
-        # Prima misura
 
         if self.noise_floor is None:
 
             self.noise_floor = rms
+            return
+
+        ratio = rms / self.noise_floor
+
+        # IMPORTANTE:
+        #
+        # Se il segnale è molto più forte del rumore,
+        # probabilmente è voce/transiente.
+        #
+        # Non dobbiamo inserirlo nel noise floor.
+        if ratio > NOISE_MAX_RATIO:
 
             return
 
-        # Exponential moving average
+        # Conserviamo il campione per poter seguire lentamente
+        # eventuali variazioni dell'ambiente.
+        self.samples.append(rms)
+
+        if not self.samples:
+            return
+
+        median_noise = float(
+            np.median(self.samples)
+        )
 
         self.noise_floor = (
-            (1.0 - NOISE_FLOOR_ALPHA)
+            (1.0 - NOISE_UPDATE_ALPHA)
             * self.noise_floor
             +
-            NOISE_FLOOR_ALPHA
-            * rms
+            NOISE_UPDATE_ALPHA
+            * median_noise
         )
+
 
     # --------------------------------------------------------
     # RATIO
@@ -172,25 +264,18 @@ class AdaptiveSpeechGate:
             self.noise_floor is None
             or self.noise_floor <= 0
         ):
-
             return 0.0
 
         return rms / self.noise_floor
+
 
     # --------------------------------------------------------
     # SPEECH
     # --------------------------------------------------------
 
-    def is_speech(
-        self,
-        rms,
-        threshold
-    ):
+    def is_speech(self, rms, threshold):
 
-        return (
-            self.ratio(rms)
-            >= threshold
-        )
+        return self.ratio(rms) >= threshold
 
 
 # ============================================================
@@ -203,9 +288,11 @@ class AudioWatchdog:
 
         self.last_audio = time.monotonic()
 
+
     def update(self):
 
         self.last_audio = time.monotonic()
+
 
     def check(self):
 
@@ -217,38 +304,24 @@ class AudioWatchdog:
 
 
 # ============================================================
-# MAIN LISTENER
+# LISTENER
 # ============================================================
 
 class WakeWordListener:
 
     def __init__(self):
 
-        # ----------------------------------------------------
-        # State
-        # ----------------------------------------------------
-
         self.state = LISTENING
 
-        self.state_start = time.monotonic()
-
-        # ----------------------------------------------------
-        # Audio queue
-        # ----------------------------------------------------
-
-        self.audio_queue = queue.Queue(
-            maxsize=100
-        )
-
-        # ----------------------------------------------------
-        # Command audio
-        # ----------------------------------------------------
+        self.audio_queue = queue.Queue(maxsize=100)
 
         self.command_audio = []
 
-        # ----------------------------------------------------
-        # Speech timers
-        # ----------------------------------------------------
+        self.state_start = time.monotonic()
+
+        self.watchdog = AudioWatchdog()
+
+        self.speech_gate = AdaptiveSpeechGate()
 
         self.speech_candidate_start = None
 
@@ -256,57 +329,28 @@ class WakeWordListener:
 
         self.last_speech_time = None
 
-        # ----------------------------------------------------
-        # Watchdog
-        # ----------------------------------------------------
+        self.cooldown_start = None
 
-        self.watchdog = AudioWatchdog()
+        self.post_wake_ignore_until = 0
 
-        # ----------------------------------------------------
-        # Speech gate
-        # ----------------------------------------------------
-
-        self.speech_gate = AdaptiveSpeechGate()
-
-        # ----------------------------------------------------
-        # WebRTC VAD
-        # ----------------------------------------------------
-
-        self.vad = webrtcvad.Vad(2)
-
-        # ----------------------------------------------------
-        # OpenWakeWord
-        # ----------------------------------------------------
-
-        print(
-            "[INIT] Loading OpenWakeWord..."
-        )
+        print()
+        print("[INIT] Loading OpenWakeWord...")
 
         self.oww = Model(
-            wakeword_models=[
-                WAKEWORD_MODEL
-            ]
+            wakeword_models=[WAKEWORD_MODEL]
         )
+
+        print("[INIT] OpenWakeWord loaded")
+
+        self.device = self.find_input_device()
 
         print(
-            "[INIT] OpenWakeWord loaded"
+            f"[INIT] Input device: {self.device}"
         )
 
-        # ----------------------------------------------------
-        # Input device
-        # ----------------------------------------------------
-
-        self.device = (
-            self.find_input_device()
-        )
-
-        print(
-            f"[INIT] Input device: "
-            f"{self.device}"
-        )
 
     # ========================================================
-    # DEVICE
+    # FIND DEVICE
     # ========================================================
 
     def find_input_device(self):
@@ -317,25 +361,22 @@ class WakeWordListener:
 
             name = device["name"]
 
-            if (
-                INPUT_DEVICE_NAME.lower()
-                in name.lower()
-            ):
+            if INPUT_DEVICE_NAME.lower() in name.lower():
 
                 print(
-                    f"[AUDIO] Found device "
-                    f"{index}: {name}"
+                    f"[AUDIO] Found device {index}: {name}"
                 )
 
                 return index
 
         raise RuntimeError(
-            "Input device not found: "
+            f"Input device not found: "
             f"{INPUT_DEVICE_NAME}"
         )
 
+
     # ========================================================
-    # AUDIO CALLBACK
+    # CALLBACK
     # ========================================================
 
     def audio_callback(
@@ -358,15 +399,12 @@ class WakeWordListener:
 
             audio = indata.copy()
 
-            self.audio_queue.put_nowait(
-                audio
-            )
+            self.audio_queue.put_nowait(audio)
 
         except queue.Full:
 
-            print(
-                "[AUDIO] Queue full"
-            )
+            pass
+
 
     # ========================================================
     # BEEP
@@ -394,22 +432,16 @@ class WakeWordListener:
                 f"[BEEP] Error: {e}"
             )
 
+
     # ========================================================
-    # OPENWAKEWORD
+    # WAKE WORD
     # ========================================================
 
     def detect_wakeword(self, audio):
 
-        if (
-            audio is None
-            or len(audio) == 0
-        ):
+        if len(audio) == 0:
 
             return False
-
-        # ----------------------------------------------------
-        # Channel 0
-        # ----------------------------------------------------
 
         channel = audio[:, 0]
 
@@ -420,9 +452,7 @@ class WakeWordListener:
 
         try:
 
-            prediction = self.oww.predict(
-                pcm
-            )
+            prediction = self.oww.predict(pcm)
 
         except Exception as e:
 
@@ -449,36 +479,6 @@ class WakeWordListener:
 
         return False
 
-    # ========================================================
-    # WEBRTC VAD
-    # ========================================================
-
-    def vad_detect(self, audio):
-
-        if (
-            audio is None
-            or len(audio) != BLOCK_SIZE
-        ):
-
-            return False
-
-        channel = audio[:, 0]
-
-        pcm = np.asarray(
-            channel,
-            dtype=np.int16
-        )
-
-        try:
-
-            return self.vad.is_speech(
-                pcm.tobytes(),
-                TARGET_SAMPLE_RATE
-            )
-
-        except Exception:
-
-            return False
 
     # ========================================================
     # STATE
@@ -495,23 +495,14 @@ class WakeWordListener:
 
         self.state = state
 
-        self.state_start = (
-            time.monotonic()
-        )
+        self.state_start = time.monotonic()
+
 
     # ========================================================
     # RESET COMMAND
     # ========================================================
 
     def reset_command(self):
-
-        # IMPORTANT:
-        #
-        # Non resettiamo il noise floor.
-        #
-        # Il noise floor appreso prima della wake word
-        # deve essere mantenuto durante WAIT_COMMAND
-        # e RECORDING.
 
         self.command_audio = []
 
@@ -521,18 +512,9 @@ class WakeWordListener:
 
         self.last_speech_time = None
 
-    # ========================================================
-    # RESET EVERYTHING
-    # ========================================================
-
-    def reset_all(self):
-
-        self.reset_command()
-
-        self.speech_gate.reset()
 
     # ========================================================
-    # PROCESS LISTENING
+    # LISTENING
     # ========================================================
 
     def process_listening(self, audio):
@@ -543,58 +525,88 @@ class WakeWordListener:
             channel
         )
 
+
         # ----------------------------------------------------
-        # Learn ambient noise
+        # CALIBRATION
+        # ----------------------------------------------------
+
+        if self.speech_gate.calibrating:
+
+            finished = (
+                self.speech_gate.calibration_update(
+                    rms
+                )
+            )
+
+            elapsed = (
+                time.monotonic()
+                - self.speech_gate.calibration_start
+            )
+
+            print(
+                f"[CAL] "
+                f"RMS={rms:.1f} "
+                f"elapsed={elapsed:.1f}s",
+                end="\r"
+            )
+
+            return
+
+
+        # ----------------------------------------------------
+        # WAKEWORD FIRST
+        # ----------------------------------------------------
+        #
+        # NON aggiorniamo il noise floor prima della wakeword.
+        #
+        # In questo modo il frame che contiene la wakeword
+        # non può contaminare immediatamente il rumore.
+        #
+
+        if self.detect_wakeword(audio):
+
+            print()
+
+            self.reset_command()
+
+            # ------------------------------------------------
+            # BLOCCO POST WAKEWORD
+            # ------------------------------------------------
+            #
+            # Ignoriamo il beep e i transienti.
+            #
+
+            self.post_wake_ignore_until = (
+                time.monotonic()
+                + POST_WAKE_IGNORE_SECONDS
+            )
+
+            print(
+                f"[GATE] "
+                f"Ignore post-wake: "
+                f"{POST_WAKE_IGNORE_SECONDS:.2f}s"
+            )
+
+            self.play_beep()
+
+            self.set_state(
+                WAIT_COMMAND
+            )
+
+            return
+
+
+        # ----------------------------------------------------
+        # NOISE UPDATE
         # ----------------------------------------------------
 
         self.speech_gate.update_noise(
             rms
         )
 
-        # ----------------------------------------------------
-        # Debug noise
-        # ----------------------------------------------------
-
-        noise = (
-            self.speech_gate.noise_floor
-            or 0.0
-        )
-
-        ratio = (
-            self.speech_gate.ratio(rms)
-        )
-
-        print(
-            f"[LISTEN] "
-            f"RMS={rms:.1f} "
-            f"noise={noise:.1f} "
-            f"ratio={ratio:.2f}",
-            end="\r"
-        )
-
-        # ----------------------------------------------------
-        # Wake word
-        # ----------------------------------------------------
-
-        if self.detect_wakeword(audio):
-
-            print()
-
-            self.play_beep()
-
-            # IMPORTANT:
-            #
-            # Non facciamo reset del noise floor.
-            #
-
-            self.reset_command()
-
-            self.set_state(
-                WAIT_COMMAND
-            )
 
     # ========================================================
-    # PROCESS WAIT COMMAND
+    # WAIT COMMAND
     # ========================================================
 
     def process_wait_command(self, audio):
@@ -605,39 +617,48 @@ class WakeWordListener:
             channel
         )
 
-        noise = (
-            self.speech_gate.noise_floor
-        )
-
-        # ----------------------------------------------------
-        # Safety
-        # ----------------------------------------------------
-
-        if (
-            noise is None
-            or noise <= 0
-        ):
-
-            # Non abbiamo ancora una baseline
-            # affidabile.
-
-            noise = rms
-
-            self.speech_gate.noise_floor = (
-                noise
-            )
-
-        # ----------------------------------------------------
-        # Ratio
-        # ----------------------------------------------------
-
         ratio = self.speech_gate.ratio(
             rms
         )
 
+        now = time.monotonic()
+
+
         # ----------------------------------------------------
-        # Debug
+        # POST-WAKE IGNORE
         # ----------------------------------------------------
+
+        if now < self.post_wake_ignore_until:
+
+            remaining = (
+                self.post_wake_ignore_until
+                - now
+            )
+
+            print(
+                f"[WAIT] "
+                f"post-wake ignore "
+                f"{remaining:.2f}s",
+                end="\r"
+            )
+
+            return
+
+
+        # ----------------------------------------------------
+        # NOISE FLOOR
+        # ----------------------------------------------------
+
+        if self.speech_gate.noise_floor is None:
+
+            noise = 0.0
+
+        else:
+
+            noise = (
+                self.speech_gate.noise_floor
+            )
+
 
         print(
             f"[WAIT] "
@@ -647,67 +668,61 @@ class WakeWordListener:
             end="\r"
         )
 
-        now = time.monotonic()
 
         # ----------------------------------------------------
         # SPEECH CANDIDATE
         # ----------------------------------------------------
 
-        if ratio >= SPEECH_START_RATIO:
-
-            # Primo blocco sopra soglia
+        if self.speech_gate.is_speech(
+            rms,
+            SPEECH_START_RATIO
+        ):
 
             if (
                 self.speech_candidate_start
                 is None
             ):
 
-                self.speech_candidate_start = (
-                    now
-                )
+                self.speech_candidate_start = now
 
-                return
-
-            # Quanto tempo siamo rimasti
-            # sopra la soglia?
-
-            speech_candidate_time = (
+            candidate_time = (
                 now
                 - self.speech_candidate_start
             )
 
+
             # ------------------------------------------------
-            # Speech confirmed
+            # CONFERMA VOCE
             # ------------------------------------------------
 
-            if (
-                speech_candidate_time
-                >= SPEECH_START_TIME
-            ):
+            if candidate_time >= SPEECH_START_TIME:
 
                 print()
 
                 print(
-                    "[SPEECH] "
-                    "Speech detected"
+                    f"[SPEECH] "
+                    f"Speech confirmed "
+                    f"({candidate_time:.2f}s)"
                 )
 
-                # ------------------------------------------------
-                # Il comando parte includendo il pre-roll
-                # già presente nel buffer.
-                # ------------------------------------------------
 
-                self.command_audio.append(
+                # ------------------------------------------------
+                # PRE-ROLL
+                # ------------------------------------------------
+                #
+                # Il pre-roll viene costruito soltanto con
+                # l'audio successivo al post-wake ignore.
+                #
+                # In questo modo il beep non entra nel comando.
+                #
+
+                self.command_audio = [
                     audio.copy()
-                )
+                ]
 
                 self.speech_start_time = now
 
                 self.last_speech_time = now
-
-                self.speech_candidate_start = (
-                    None
-                )
 
                 self.set_state(
                     RECORDING
@@ -717,47 +732,19 @@ class WakeWordListener:
 
         else:
 
-            # ------------------------------------------------
-            # Tornati sotto soglia:
-            # la candidatura viene annullata.
-            # ------------------------------------------------
+            # Segnale insufficiente:
+            # annulliamo il candidato.
 
-            self.speech_candidate_start = (
-                None
-            )
+            self.speech_candidate_start = None
 
-        # ====================================================
-        # PRE-ROLL
-        # ====================================================
 
-        self.command_audio.append(
-            audio.copy()
-        )
-
-        max_blocks = int(
-            PRE_ROLL_SECONDS
-            / (BLOCK_MS / 1000)
-        )
+        # ----------------------------------------------------
+        # TIMEOUT
+        # ----------------------------------------------------
 
         if (
-            len(self.command_audio)
-            > max_blocks
-        ):
-
-            self.command_audio = (
-                self.command_audio[
-                    -max_blocks:
-                ]
-            )
-
-        # ====================================================
-        # WAIT TIMEOUT
-        # ====================================================
-
-        if (
-            now
-            - self.state_start
-            > MAX_COMMAND_SECONDS
+            now - self.state_start
+            >= WAIT_COMMAND_TIMEOUT
         ):
 
             print()
@@ -767,14 +754,13 @@ class WakeWordListener:
                 "Command timeout"
             )
 
-            self.reset_command()
-
             self.set_state(
                 LISTENING
             )
 
+
     # ========================================================
-    # PROCESS RECORDING
+    # RECORDING
     # ========================================================
 
     def process_recording(self, audio):
@@ -789,40 +775,32 @@ class WakeWordListener:
             rms
         )
 
+        now = time.monotonic()
+
+
         # ----------------------------------------------------
-        # Add audio
+        # SAVE AUDIO
         # ----------------------------------------------------
 
         self.command_audio.append(
             audio.copy()
         )
 
-        now = time.monotonic()
 
         # ----------------------------------------------------
-        # SPEECH ACTIVE
+        # SPEECH / SILENCE
         # ----------------------------------------------------
 
         if ratio >= SPEECH_END_RATIO:
 
             self.last_speech_time = now
 
-        # ----------------------------------------------------
-        # SPEECH SILENCE
-        # ----------------------------------------------------
-
-        if self.last_speech_time is None:
-
-            self.last_speech_time = now
 
         silence_time = (
             now
             - self.last_speech_time
         )
 
-        # ----------------------------------------------------
-        # Debug
-        # ----------------------------------------------------
 
         print(
             f"[REC] "
@@ -832,41 +810,36 @@ class WakeWordListener:
             end="\r"
         )
 
-        # ====================================================
-        # SPEECH ENDED
-        # ====================================================
 
-        if (
-            silence_time
-            >= SPEECH_END_TIME
-        ):
+        # ----------------------------------------------------
+        # END OF COMMAND
+        # ----------------------------------------------------
+
+        if silence_time >= SPEECH_END_TIME:
 
             print()
 
             print(
-                "[SPEECH] "
+                f"[SPEECH] "
                 f"End detected "
-                f"(silence="
-                f"{silence_time:.2f}s)"
+                f"(silence={silence_time:.2f}s)"
             )
 
             self.finish_command()
 
             return
 
-        # ====================================================
-        # MAX COMMAND
-        # ====================================================
+
+        # ----------------------------------------------------
+        # MAX COMMAND TIME
+        # ----------------------------------------------------
 
         command_time = (
             now
             - self.speech_start_time
         )
 
-        if (
-            command_time
-            >= MAX_COMMAND_SECONDS
-        ):
+        if command_time >= MAX_COMMAND_SECONDS:
 
             print()
 
@@ -877,7 +850,6 @@ class WakeWordListener:
 
             self.finish_command()
 
-            return
 
     # ========================================================
     # FINISH COMMAND
@@ -887,16 +859,15 @@ class WakeWordListener:
 
         if not self.command_audio:
 
-            self.reset_command()
-
             self.set_state(
                 LISTENING
             )
 
             return
 
+
         # ----------------------------------------------------
-        # Concatenate
+        # CONCAT AUDIO
         # ----------------------------------------------------
 
         audio = np.concatenate(
@@ -904,10 +875,43 @@ class WakeWordListener:
             axis=0
         )
 
+
+        # ----------------------------------------------------
+        # PRE-ROLL
+        # ----------------------------------------------------
+        #
+        # Manteniamo massimo PRE_ROLL_SECONDS prima
+        # dell'inizio effettivo della voce.
+        #
+        # Attenzione:
+        # speech_start_time è un timestamp reale, quindi
+        # qui limitiamo semplicemente la quantità iniziale
+        # mantenuta nel buffer.
+        #
+
+        max_samples = int(
+            (
+                PRE_ROLL_SECONDS
+                + MAX_COMMAND_SECONDS
+            )
+            * TARGET_SAMPLE_RATE
+        )
+
+
+        if len(audio) > max_samples:
+
+            audio = audio[-max_samples:]
+
+
+        # ----------------------------------------------------
+        # DURATION
+        # ----------------------------------------------------
+
         duration = (
             len(audio)
             / TARGET_SAMPLE_RATE
         )
+
 
         print()
 
@@ -917,33 +921,47 @@ class WakeWordListener:
             f"{duration:.2f}s"
         )
 
-        # ====================================================
-        # SAVE TEMP WAV
-        # ====================================================
+
+        # ----------------------------------------------------
+        # SAVE WAV
+        # ----------------------------------------------------
 
         filename = (
             "/tmp/keyvoice_command.wav"
         )
 
+
         try:
 
-            import soundfile as sf
-
-            # Channel 0 only for Vosk
-
-            mono = audio[:, 0]
-
-            sf.write(
-                filename,
-                mono,
-                TARGET_SAMPLE_RATE,
-                subtype="PCM_16"
+            # Solo canale 0
+            mono = np.asarray(
+                audio[:, 0],
+                dtype=np.int16
             )
+
+            with wave.open(
+                filename,
+                "wb"
+            ) as wf:
+
+                wf.setnchannels(1)
+
+                wf.setsampwidth(2)
+
+                wf.setframerate(
+                    TARGET_SAMPLE_RATE
+                )
+
+                wf.writeframes(
+                    mono.tobytes()
+                )
+
 
             print(
                 f"[RECORD] "
                 f"Saved: {filename}"
             )
+
 
         except Exception as e:
 
@@ -952,29 +970,28 @@ class WakeWordListener:
                 f"Save error: {e}"
             )
 
-        # ====================================================
-        # VOSK PLACEHOLDER
-        # ====================================================
 
         print(
             "[RECORD] "
             "Ready for Vosk processing"
         )
 
-        # ====================================================
-        # COOLDOWN
-        # ====================================================
 
-        self.cooldown_start = (
-            time.monotonic()
-        )
+        # ----------------------------------------------------
+        # COOLDOWN
+        # ----------------------------------------------------
 
         self.set_state(
             COOLDOWN
         )
 
+        self.cooldown_start = (
+            time.monotonic()
+        )
+
+
     # ========================================================
-    # PROCESS COOLDOWN
+    # COOLDOWN
     # ========================================================
 
     def process_cooldown(self, audio):
@@ -990,6 +1007,7 @@ class WakeWordListener:
             self.set_state(
                 LISTENING
             )
+
 
     # ========================================================
     # PROCESS AUDIO
@@ -1021,6 +1039,7 @@ class WakeWordListener:
                 audio
             )
 
+
     # ========================================================
     # RUN
     # ========================================================
@@ -1028,84 +1047,69 @@ class WakeWordListener:
     def run(self):
 
         print()
-
+        print("================================================")
+        print(" KeyVoice Wake Word Listener")
+        print("================================================")
         print(
-            "========================================"
+            f"Sample rate : {TARGET_SAMPLE_RATE}"
         )
-
         print(
-            " KeyVoice Wake Word Listener"
+            f"Channels    : {CHANNELS}"
         )
-
         print(
-            "========================================"
+            f"Wake word   : {WAKEWORD_MODEL}"
         )
-
         print(
-            f"Sample rate : "
-            f"{TARGET_SAMPLE_RATE}"
+            f"Threshold   : {WAKEWORD_THRESHOLD}"
         )
-
         print(
-            f"Channels    : "
-            f"{CHANNELS}"
+            f"Start ratio : {SPEECH_START_RATIO}"
         )
-
         print(
-            f"Wake word   : "
-            f"{WAKEWORD_MODEL}"
+            f"End ratio   : {SPEECH_END_RATIO}"
         )
-
         print(
-            f"Threshold   : "
-            f"{WAKEWORD_THRESHOLD}"
+            f"Start time  : {SPEECH_START_TIME}s"
         )
-
         print(
-            f"Start ratio : "
-            f"{SPEECH_START_RATIO}"
+            f"End time    : {SPEECH_END_TIME}s"
         )
-
         print(
-            f"End ratio   : "
-            f"{SPEECH_END_RATIO}"
+            f"Noise cal   : {NOISE_LEARN_SECONDS}s"
         )
-
         print(
-            f"Start time  : "
-            f"{SPEECH_START_TIME:.2f}s"
+            f"Post wake   : {POST_WAKE_IGNORE_SECONDS}s"
         )
-
         print(
-            f"End time    : "
-            f"{SPEECH_END_TIME:.2f}s"
+            f"Pre-roll    : {PRE_ROLL_SECONDS}s"
         )
-
-        print(
-            f"Pre-roll    : "
-            f"{PRE_ROLL_SECONDS:.2f}s"
-        )
-
+        print("================================================")
         print()
 
-        print(
-            "[LISTENER] "
-            "In ascolto..."
-        )
-
-        # ====================================================
-        # INPUT STREAM
-        # ====================================================
 
         with sd.InputStream(
+
             device=self.device,
+
             samplerate=DEVICE_SAMPLE_RATE,
+
             channels=CHANNELS,
+
             dtype="int16",
+
             blocksize=BLOCK_SIZE,
+
             callback=self.audio_callback,
+
             latency="low"
+
         ):
+
+            print(
+                "[LISTENER] "
+                "Calibrazione rumore..."
+            )
+
 
             while True:
 
@@ -1117,11 +1121,10 @@ class WakeWordListener:
                         )
                     )
 
+
                 except queue.Empty:
 
                     if not self.watchdog.check():
-
-                        print()
 
                         print(
                             "[WATCHDOG] "
@@ -1129,6 +1132,7 @@ class WakeWordListener:
                         )
 
                     continue
+
 
                 self.process_audio(
                     audio
@@ -1147,6 +1151,7 @@ if __name__ == "__main__":
 
         listener.run()
 
+
     except KeyboardInterrupt:
 
         print()
@@ -1156,9 +1161,8 @@ if __name__ == "__main__":
             "Listener stopped"
         )
 
-    except Exception as e:
 
-        print()
+    except Exception as e:
 
         print(
             f"[FATAL] {e}"
