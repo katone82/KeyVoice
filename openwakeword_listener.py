@@ -1,762 +1,1608 @@
-#!/usr/bin/env python3
+    import os
+    import queue
+    import subprocess
+    import threading
+    import time
+    import wave
+    from typing import List
 
-import os
-import time
-import threading
-import queue
-import subprocess
-import collections
-import math
+    import numpy as np
+    import sounddevice as sd
+    import webrtcvad
 
-import numpy as np
-import sounddevice as sd
-import webrtcvad
-from openwakeword.model import Model
+    from openwakeword.model import Model
 
+    # ============================================================
 
-# ============================================================
-# CONFIG
-# ============================================================
+    # AUDIO CONFIGURATION
 
-TARGET_SAMPLE_RATE = 16000
-DEVICE_SAMPLE_RATE = 16000
+    # ============================================================
 
-CHANNELS = 2
-INPUT_DEVICE_NAME = "reSpeaker XVF3800 4-Mic Array"
+    TARGET_SAMPLE_RATE = 16_000
+    DEVICE_SAMPLE_RATE = 16_000
 
-BLOCK_MS = 30
-BLOCK_SIZE = int(TARGET_SAMPLE_RATE * BLOCK_MS / 1000)
+    CHANNELS = 2
+    ACTIVE_CHANNEL = 0
 
-WAKEWORD_THRESHOLD = 0.35
-WAKEWORD_MODEL = "hey_jarvis"
+    AUDIO_DTYPE = "int16"
 
-MAX_COMMAND_SECONDS = 6.0
+    # 40 ms
 
-# Politica speech gate
-SPEECH_START_RATIO = 2.5
-SPEECH_END_RATIO = 1.5
+    OWW_FRAME_LENGTH = 640
+    DEVICE_FRAME_LENGTH = OWW_FRAME_LENGTH
 
-SPEECH_START_TIME = 0.12
-SPEECH_END_TIME = 0.50
+    INPUT_DEVICE_NAME = "reSpeaker XVF3800 4-Mic Array"
 
-NOISE_FLOOR_ALPHA = 0.02
-NOISE_LEARN_SECONDS = 2.0
+    AUDIO_QUEUE_MAXSIZE = 50
 
-# watchdog
-AUDIO_WATCHDOG_SECONDS = 3.0
+    # ============================================================
 
-# Beep
-BEEP_FILE = "/home/homeassistant/KeyVoice/sounds/wake.wav"
-BEEP_DEVICE = "plughw:4,0"
+    # LISTENER STATES
 
+    # ============================================================
 
-# ============================================================
-# STATES
-# ============================================================
+    STATE_LISTENING = "listening"
+    STATE_WAIT_COMMAND = "wait_command"
+    STATE_RECORDING = "recording"
+    STATE_COOLDOWN = "cooldown"
 
-LISTENING = "LISTENING"
-WAIT_COMMAND = "WAIT_COMMAND"
-RECORDING = "RECORDING"
-COOLDOWN = "COOLDOWN"
+    # ============================================================
 
+    # BEEP
 
-# ============================================================
-# ADAPTIVE SPEECH GATE
-# ============================================================
+    # ============================================================
 
-class AdaptiveSpeechGate:
+    BEEP_FILE = "/home/homeassistant/KeyVoice/sounds/wake.wav"
 
-    def __init__(self):
+    BEEP_DEVICE = "plughw:4,0"
+
+    def play_beep() -> None:
+
+    ```
+    if not os.path.exists(BEEP_FILE):
+
+        print(
+            f"[BEEP] File non trovato: {BEEP_FILE}"
+        )
+
+        return
+
+    try:
+
+        subprocess.run(
+            [
+                "aplay",
+                "-q",
+                "-D",
+                BEEP_DEVICE,
+                BEEP_FILE
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=2
+        )
+
+    except subprocess.TimeoutExpired:
+
+        print("[BEEP] Timeout riproduzione")
+
+    except Exception as exc:
+
+        print(f"[BEEP] Errore: {exc}")
+    ```
+
+    # ============================================================
+
+    # DEVICE SEARCH
+
+    # ============================================================
+
+    def find_input_device(
+    device_name: str
+    ) -> int:
+
+    ```
+    devices = sd.query_devices()
+
+    print(
+        "[AUDIO] Dispositivi input disponibili:"
+    )
+
+    for index, device in enumerate(devices):
+
+        max_input_channels = device.get(
+            "max_input_channels",
+            0
+        )
+
+        if max_input_channels <= 0:
+            continue
+
+        print(
+            f"[AUDIO]   {index}: "
+            f"{device['name']} "
+            f"(IN={max_input_channels}, "
+            f"RATE={device['default_samplerate']})"
+        )
+
+    wanted = device_name.lower()
+
+    for index, device in enumerate(devices):
+
+        if (
+            device.get("max_input_channels", 0) > 0
+            and wanted in device["name"].lower()
+        ):
+
+            print(
+                "[AUDIO] Microfono selezionato: "
+                f"{index} - {device['name']}"
+            )
+
+            return index
+
+    raise RuntimeError(
+        f"Dispositivo audio non trovato: {device_name}"
+    )
+    ```
+
+    # ============================================================
+
+    # DEBUG AUDIO
+
+    # ============================================================
+
+    def save_debug_audio(
+    buffer: List[int],
+    sample_rate: int
+    ) -> None:
+
+    ```
+    debug_dir = "debug_audio"
+
+    os.makedirs(
+        debug_dir,
+        exist_ok=True
+    )
+
+    timestamp = time.strftime(
+        "%Y%m%d_%H%M%S"
+    )
+
+    filename = os.path.join(
+        debug_dir,
+        f"command_{timestamp}.wav"
+    )
+
+    audio_data = np.asarray(
+        buffer,
+        dtype=np.int16
+    )
+
+    with wave.open(
+        filename,
+        "wb"
+    ) as wav_file:
+
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+
+        wav_file.writeframes(
+            audio_data.tobytes()
+        )
+
+    print(
+        f"[DEBUG] Audio salvato: {filename}"
+    )
+    ```
+
+    # ============================================================
+
+    # ADAPTIVE SPEECH GATE
+
+    # ============================================================
+
+    class AdaptiveSpeechGate:
+    """
+    Speech gate basato sull'energia RMS del Channel 0.
+
+    ```
+    Non usa una soglia assoluta.
+
+    Prima costruisce il rumore di fondo:
+
+        noise_floor
+
+    Successivamente confronta:
+
+        current_energy / noise_floor
+
+    con una soglia relativa.
+
+    Il gate ha isteresi:
+
+        START -> soglia più alta
+        END   -> soglia più bassa
+
+    Questo evita continui ON/OFF vicino alla soglia.
+    """
+
+    def __init__(
+        self,
+        sample_rate: int,
+        noise_learning_seconds: float = 2.0,
+        start_ratio: float = 2.5,
+        end_ratio: float = 1.5,
+        min_voice_seconds: float = 0.12,
+        min_silence_seconds: float = 0.50,
+    ):
+
+        self.sample_rate = sample_rate
+
+        self.noise_learning_seconds = (
+            noise_learning_seconds
+        )
+
+        self.start_ratio = start_ratio
+        self.end_ratio = end_ratio
+
+        self.min_voice_seconds = (
+            min_voice_seconds
+        )
+
+        self.min_silence_seconds = (
+            min_silence_seconds
+        )
+
+        self.energy_samples = []
+
         self.noise_floor = None
-        self.last_update = time.monotonic()
 
-    def reset(self):
-        self.noise_floor = None
-        self.last_update = time.monotonic()
+        self.voice_since = None
+        self.silence_since = None
 
-    def rms(self, audio):
-        if len(audio) == 0:
-            return 0.0
-
-        x = audio.astype(np.float32)
-
-        return float(np.sqrt(np.mean(x * x) + 1e-12))
-
-    def update_noise(self, rms):
-        if rms <= 0:
-            return
-
-        if self.noise_floor is None:
-            self.noise_floor = rms
-            return
-
-        self.noise_floor = (
-            (1.0 - NOISE_FLOOR_ALPHA) * self.noise_floor
-            + NOISE_FLOOR_ALPHA * rms
-        )
-
-    def ratio(self, rms):
-        if self.noise_floor is None or self.noise_floor <= 0:
-            return 0.0
-
-        return rms / self.noise_floor
-
-    def is_speech(self, rms, threshold):
-        return self.ratio(rms) >= threshold
-
-
-# ============================================================
-# AUDIO WATCHDOG
-# ============================================================
-
-class AudioWatchdog:
-
-    def __init__(self):
-        self.last_audio = time.monotonic()
-
-    def update(self):
-        self.last_audio = time.monotonic()
-
-    def check(self):
-        return (
-            time.monotonic() - self.last_audio
-            <= AUDIO_WATCHDOG_SECONDS
-        )
-
-
-# ============================================================
-# MAIN LISTENER
-# ============================================================
-
-class WakeWordListener:
-
-    def __init__(self):
-
-        self.state = LISTENING
-
-        self.audio_queue = queue.Queue()
-
-        self.command_audio = []
-
-        self.state_start = time.monotonic()
-
-        self.watchdog = AudioWatchdog()
-
-        self.speech_gate = AdaptiveSpeechGate()
-
-        self.vad = webrtcvad.Vad(2)
-
-        print("[INIT] Loading OpenWakeWord...")
-
-        self.oww = Model(
-            wakeword_models=[WAKEWORD_MODEL]
-        )
-
-        print("[INIT] OpenWakeWord loaded")
-
-        self.device = self.find_input_device()
-
-        print(f"[INIT] Input device: {self.device}")
+        self.speech = False
 
     # --------------------------------------------------------
-    # DEVICE
+    # RESET
     # --------------------------------------------------------
 
-    def find_input_device(self):
+    def reset(self) -> None:
 
-        devices = sd.query_devices()
+        self.energy_samples.clear()
 
-        for index, device in enumerate(devices):
+        self.noise_floor = None
 
-            name = device["name"]
+        self.voice_since = None
+        self.silence_since = None
 
-            if INPUT_DEVICE_NAME.lower() in name.lower():
+        self.speech = False
 
-                print(
-                    f"[AUDIO] Found device {index}: {name}"
+    # --------------------------------------------------------
+    # ENERGY
+    # --------------------------------------------------------
+
+    @staticmethod
+    def calculate_energy(
+        pcm: np.ndarray
+    ) -> float:
+
+        if len(pcm) == 0:
+            return 0.0
+
+        audio = pcm.astype(
+            np.float32
+        )
+
+        rms = np.sqrt(
+            np.mean(
+                audio * audio
+            )
+        )
+
+        return float(rms)
+
+    # --------------------------------------------------------
+    # INITIAL NOISE CALIBRATION
+    # --------------------------------------------------------
+
+    def update_noise_floor(
+        self,
+        energy: float
+    ) -> bool:
+
+        if self.noise_floor is not None:
+
+            return True
+
+        self.energy_samples.append(
+            energy
+        )
+
+        required_samples = int(
+            self.noise_learning_seconds
+            * self.sample_rate
+            / DEVICE_FRAME_LENGTH
+        )
+
+        if len(self.energy_samples) < required_samples:
+
+            return False
+
+        # Mediana molto più robusta
+        # rispetto alla media in presenza
+        # di qualche rumore improvviso.
+
+        self.noise_floor = max(
+            float(
+                np.median(
+                    self.energy_samples
+                )
+            ),
+            1.0
+        )
+
+        print(
+            "[DSP] Noise floor iniziale: "
+            f"{self.noise_floor:.2f}"
+        )
+
+        return True
+
+    # --------------------------------------------------------
+    # PROCESS
+    # --------------------------------------------------------
+
+    def process(
+        self,
+        pcm: np.ndarray,
+        now: float
+    ) -> bool:
+
+        energy = self.calculate_energy(
+            pcm
+        )
+
+        # ----------------------------------------------------
+        # NOISE CALIBRATION
+        # ----------------------------------------------------
+
+        if not self.update_noise_floor(
+            energy
+        ):
+
+            return False
+
+        # ----------------------------------------------------
+        # SLOW NOISE FLOOR UPDATE
+        # ----------------------------------------------------
+
+        if not self.speech:
+
+            alpha = 0.02
+
+            self.noise_floor = (
+                (1.0 - alpha)
+                * self.noise_floor
+                + alpha
+                * max(energy, 1.0)
+            )
+
+        # ----------------------------------------------------
+        # RELATIVE ENERGY
+        # ----------------------------------------------------
+
+        ratio = (
+            energy
+            / max(
+                self.noise_floor,
+                1.0
+            )
+        )
+
+        # ----------------------------------------------------
+        # START SPEECH
+        # ----------------------------------------------------
+
+        if not self.speech:
+
+            if ratio >= self.start_ratio:
+
+                self.silence_since = None
+
+                if self.voice_since is None:
+
+                    self.voice_since = now
+
+                elapsed = (
+                    now
+                    - self.voice_since
                 )
 
-                return index
+                if (
+                    elapsed
+                    >= self.min_voice_seconds
+                ):
 
-        raise RuntimeError(
-            f"Input device not found: {INPUT_DEVICE_NAME}"
+                    self.speech = True
+
+                    self.voice_since = None
+
+                    print(
+                        "[DSP] VOCE ON "
+                        f"energy={energy:.1f} "
+                        f"floor={self.noise_floor:.1f} "
+                        f"ratio={ratio:.2f}"
+                    )
+
+                    return True
+
+            else:
+
+                self.voice_since = None
+
+            return False
+
+        # ----------------------------------------------------
+        # END SPEECH
+        # ----------------------------------------------------
+
+        if ratio <= self.end_ratio:
+
+            self.voice_since = None
+
+            if self.silence_since is None:
+
+                self.silence_since = now
+
+            elapsed = (
+                now
+                - self.silence_since
+            )
+
+            if (
+                elapsed
+                >= self.min_silence_seconds
+            ):
+
+                self.speech = False
+
+                self.silence_since = None
+
+                print(
+                    "[DSP] VOCE OFF "
+                    f"energy={energy:.1f} "
+                    f"floor={self.noise_floor:.1f} "
+                    f"ratio={ratio:.2f}"
+                )
+
+                return False
+
+        else:
+
+            self.silence_since = None
+
+        return True
+
+    # --------------------------------------------------------
+    # DEBUG
+    # --------------------------------------------------------
+
+    def debug_info(
+        self,
+        pcm: np.ndarray
+    ) -> str:
+
+        energy = self.calculate_energy(
+            pcm
         )
 
+        if self.noise_floor is None:
+
+            return (
+                f"energy={energy:.1f} "
+                "floor=CALIBRATING"
+            )
+
+        ratio = (
+            energy
+            / max(
+                self.noise_floor,
+                1.0
+            )
+        )
+
+        return (
+            f"energy={energy:.1f} "
+            f"floor={self.noise_floor:.1f} "
+            f"ratio={ratio:.2f} "
+            f"speech={self.speech}"
+        )
+    ```
+
+    # ============================================================
+
+    # OPENWAKEWORD LISTENER
+
+    # ============================================================
+
+    def openwakeword_listener(
+    audio_queue,
+    stop_event: threading.Event,
+    config: dict
+    ) -> None:
+
+    ```
+    # ========================================================
+    # CONFIG
+    # ========================================================
+
+    model_name = config.get(
+        "model",
+        "hey_jarvis"
+    )
+
+    threshold = config.get(
+        "threshold",
+        0.35
+    )
+
+    save_debug = config.get(
+        "save_debug_audio",
+        False
+    )
+
+    debug_wakeword = config.get(
+        "debug_wakeword",
+        False
+    )
+
     # --------------------------------------------------------
-    # AUDIO CALLBACK
+    # SPEECH GATE
     # --------------------------------------------------------
 
+    noise_learning_seconds = config.get(
+        "noise_learning_seconds",
+        2.0
+    )
+
+    speech_start_ratio = config.get(
+        "speech_start_ratio",
+        2.5
+    )
+
+    speech_end_ratio = config.get(
+        "speech_end_ratio",
+        1.5
+    )
+
+    speech_start_seconds = config.get(
+        "speech_start_seconds",
+        0.12
+    )
+
+    speech_end_seconds = config.get(
+        "speech_end_seconds",
+        0.50
+    )
+
+    # --------------------------------------------------------
+    # TIMEOUT
+    # --------------------------------------------------------
+
+    voice_start_timeout = config.get(
+        "voice_start_timeout",
+        1.5
+    )
+
+    max_command_seconds = config.get(
+        "max_command_seconds",
+        6.0
+    )
+
+    min_command_seconds = config.get(
+        "min_command_seconds",
+        0.4
+    )
+
+    post_buffer_seconds = config.get(
+        "post_buffer_seconds",
+        0.1
+    )
+
+    wakeword_cooldown_sec = config.get(
+        "wakeword_cooldown_sec",
+        1.5
+    )
+
+    audio_watchdog_seconds = config.get(
+        "audio_watchdog_seconds",
+        3.0
+    )
+
+    print(
+        "[OPENWAKEWORD] Thread partito"
+    )
+
+    print(
+        f"[OPENWAKEWORD] Modello: {model_name}"
+    )
+
+    print(
+        f"[OPENWAKEWORD] Threshold: {threshold}"
+    )
+
+    print(
+        "[DSP] "
+        f"Noise learning: "
+        f"{noise_learning_seconds}s"
+    )
+
+    print(
+        "[DSP] "
+        f"Speech start ratio: "
+        f"{speech_start_ratio}"
+    )
+
+    print(
+        "[DSP] "
+        f"Speech end ratio: "
+        f"{speech_end_ratio}"
+    )
+
+    # ========================================================
+    # MODEL
+    # ========================================================
+
+    try:
+
+        model = Model(
+            wakeword_models=[
+                model_name
+            ],
+            inference_framework="onnx"
+        )
+
+        print(
+            "[OPENWAKEWORD] Modello caricato"
+        )
+
+    except Exception as exc:
+
+        print(
+            "[OPENWAKEWORD] "
+            f"Errore caricamento modello: {exc}"
+        )
+
+        stop_event.set()
+
+        return
+
+    # ========================================================
+    # WEBRTC VAD
+    #
+    # Manteniamo VAD solo come informazione secondaria.
+    # NON decide più l'inizio/fine registrazione.
+    # ========================================================
+
+    vad = webrtcvad.Vad()
+
+    vad.set_mode(
+        config.get(
+            "vad_mode",
+            2
+        )
+    )
+
+    vad_frame_ms = 30
+
+    vad_frame_length = int(
+        TARGET_SAMPLE_RATE
+        * vad_frame_ms
+        / 1000
+    )
+
+    vad_buffer: List[int] = []
+
+    # ========================================================
+    # INTERNAL AUDIO QUEUE
+    # ========================================================
+
+    mic_queue = queue.Queue(
+        maxsize=AUDIO_QUEUE_MAXSIZE
+    )
+
+    # ========================================================
+    # CALLBACK HEARTBEAT
+    # ========================================================
+
+    heartbeat_lock = threading.Lock()
+
+    last_audio_callback = (
+        time.monotonic()
+    )
+
+    callback_count = 0
+
+    # ========================================================
+    # AUDIO CALLBACK
+    # ========================================================
+
     def audio_callback(
-        self,
         indata,
         frames,
         callback_time,
         status
     ):
 
+        nonlocal last_audio_callback
+        nonlocal callback_count
+
         if status:
+
             print(
-                f"[AUDIO] {status}"
+                f"[AUDIO] Callback status: {status}"
             )
 
-        self.watchdog.update()
+        with heartbeat_lock:
+
+            last_audio_callback = (
+                time.monotonic()
+            )
+
+            callback_count += 1
+
+        if (
+            indata.ndim != 2
+            or indata.shape[1] <= ACTIVE_CHANNEL
+        ):
+
+            print(
+                "[AUDIO] Formato inatteso: "
+                f"shape={indata.shape}"
+            )
+
+            return
+
+        chunk = np.array(
+            indata[:, ACTIVE_CHANNEL],
+            dtype=np.int16,
+            copy=True
+        )
 
         try:
 
-            audio = indata.copy()
-
-            self.audio_queue.put_nowait(audio)
+            mic_queue.put_nowait(
+                chunk
+            )
 
         except queue.Full:
-            pass
 
-    # --------------------------------------------------------
-    # BEEP
-    # --------------------------------------------------------
+            try:
 
-    def play_beep(self):
+                mic_queue.get_nowait()
 
-        try:
+            except queue.Empty:
 
-            subprocess.Popen(
-                [
-                    "aplay",
-                    "-q",
-                    "-D",
-                    BEEP_DEVICE,
-                    BEEP_FILE
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
+                pass
+
+            try:
+
+                mic_queue.put_nowait(
+                    chunk
+                )
+
+            except queue.Full:
+
+                pass
+
+    # ========================================================
+    # DEVICE
+    # ========================================================
+
+    try:
+
+        input_device_index = (
+            find_input_device(
+                INPUT_DEVICE_NAME
+            )
+        )
+
+        device_info = sd.query_devices(
+            input_device_index,
+            "input"
+        )
+
+        print(
+            "[AUDIO] Device: "
+            f"{device_info['name']}"
+        )
+
+        print(
+            "[AUDIO] Capture: "
+            f"{DEVICE_SAMPLE_RATE} Hz"
+        )
+
+        print(
+            "[AUDIO] Channels: "
+            f"{CHANNELS}"
+        )
+
+        print(
+            "[AUDIO] Active channel: "
+            f"{ACTIVE_CHANNEL}"
+        )
+
+    except Exception as exc:
+
+        print(
+            "[AUDIO] "
+            f"Errore ricerca microfono: {exc}"
+        )
+
+        stop_event.set()
+
+        return
+
+    # ========================================================
+    # STREAM MANAGEMENT
+    # ========================================================
+
+    stream = None
+
+    def clear_mic_queue() -> None:
+
+        while True:
+
+            try:
+
+                mic_queue.get_nowait()
+
+            except queue.Empty:
+
+                return
+
+    def start_audio_stream() -> None:
+
+        nonlocal stream
+        nonlocal last_audio_callback
+
+        if stream is not None:
+
+            try:
+                stream.stop()
+            except Exception:
+                pass
+
+            try:
+                stream.close()
+            except Exception:
+                pass
+
+            stream = None
+
+        clear_mic_queue()
+
+        print(
+            "[AUDIO] Apertura InputStream..."
+        )
+
+        stream = sd.InputStream(
+            device=input_device_index,
+            samplerate=DEVICE_SAMPLE_RATE,
+            blocksize=DEVICE_FRAME_LENGTH,
+            channels=CHANNELS,
+            dtype=AUDIO_DTYPE,
+            callback=audio_callback
+        )
+
+        stream.start()
+
+        with heartbeat_lock:
+
+            last_audio_callback = (
+                time.monotonic()
             )
 
-        except Exception as e:
+        print(
+            "[AUDIO] InputStream attivo"
+        )
 
-            print(
-                f"[BEEP] Error: {e}"
-            )
+    def restart_audio_stream(
+        reason: str
+    ) -> bool:
 
-    # --------------------------------------------------------
-    # OPENWAKEWORD
-    # --------------------------------------------------------
+        nonlocal stream
 
-    def detect_wakeword(self, audio):
-
-        if len(audio) == 0:
-            return False
-
-        # Channel 0
-        channel = audio[:, 0]
-
-        pcm = np.asarray(
-            channel,
-            dtype=np.float32
+        print()
+        print(
+            "[AUDIO] =============================="
+        )
+        print(
+            f"[AUDIO] Riavvio stream: {reason}"
+        )
+        print(
+            "[AUDIO] =============================="
         )
 
         try:
 
-            prediction = self.oww.predict(
-                pcm
-            )
+            if stream is not None:
 
-        except Exception as e:
+                try:
+                    stream.abort()
+                except Exception:
+                    pass
+
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+
+                stream = None
+
+            clear_mic_queue()
+
+            time.sleep(0.3)
+
+            start_audio_stream()
 
             print(
-                f"[OWW] Error: {e}"
-            )
-
-            return False
-
-        score = prediction.get(
-            WAKEWORD_MODEL,
-            0.0
-        )
-
-        if score >= WAKEWORD_THRESHOLD:
-
-            print(
-                f"[WAKE] {WAKEWORD_MODEL} "
-                f"score={score:.3f}"
+                "[AUDIO] Stream ripristinato"
             )
 
             return True
 
-        return False
-
-    # --------------------------------------------------------
-    # WEBRTC VAD
-    # --------------------------------------------------------
-
-    def vad_detect(self, audio):
-
-        if len(audio) != BLOCK_SIZE:
-            return False
-
-        channel = audio[:, 0]
-
-        pcm = np.asarray(
-            channel,
-            dtype=np.int16
-        )
-
-        try:
-
-            return self.vad.is_speech(
-                pcm.tobytes(),
-                TARGET_SAMPLE_RATE
-            )
-
-        except Exception:
-
-            return False
-
-    # --------------------------------------------------------
-    # STATE
-    # --------------------------------------------------------
-
-    def set_state(self, state):
-
-        if state != self.state:
+        except Exception as exc:
 
             print(
-                f"[STATE] {self.state} -> {state}"
+                "[AUDIO] "
+                f"ERRORE riavvio stream: {exc}"
             )
 
-        self.state = state
-        self.state_start = time.monotonic()
+            return False
 
-    # --------------------------------------------------------
-    # RESET COMMAND
-    # --------------------------------------------------------
+    try:
 
-    def reset_command(self):
+        start_audio_stream()
 
-        self.command_audio = []
-
-        self.speech_gate.reset()
-
-    # --------------------------------------------------------
-    # PROCESS LISTENING
-    # --------------------------------------------------------
-
-    def process_listening(self, audio):
-
-        channel = audio[:, 0]
-
-        rms = self.speech_gate.rms(
-            channel
-        )
-
-        # In listening state we continuously
-        # learn the ambient noise level.
-
-        self.speech_gate.update_noise(
-            rms
-        )
-
-        if self.detect_wakeword(audio):
-
-            self.play_beep()
-
-            self.reset_command()
-
-            self.set_state(
-                WAIT_COMMAND
-            )
-
-    # --------------------------------------------------------
-    # PROCESS WAIT COMMAND
-    # --------------------------------------------------------
-
-    def process_wait_command(self, audio):
-
-        channel = audio[:, 0]
-
-        rms = self.speech_gate.rms(
-            channel
-        )
-
-        ratio = self.speech_gate.ratio(
-            rms
-        )
+    except Exception as exc:
 
         print(
-            f"[WAIT] RMS={rms:.1f} "
-            f"noise={self.speech_gate.noise_floor:.1f} "
-            f"ratio={ratio:.2f}",
-            end="\r"
+            "[AUDIO] "
+            f"Errore apertura InputStream: {exc}"
         )
 
-        # Do NOT immediately adapt the noise floor here.
-        #
-        # We want to preserve the noise reference obtained
-        # before the wake word.
+        stop_event.set()
 
-        if self.speech_gate.is_speech(
-            rms,
-            SPEECH_START_RATIO
-        ):
+        return
 
-            print()
+    # ========================================================
+    # SPEECH GATE
+    # ========================================================
+
+    speech_gate = AdaptiveSpeechGate(
+        sample_rate=TARGET_SAMPLE_RATE,
+        noise_learning_seconds=noise_learning_seconds,
+        start_ratio=speech_start_ratio,
+        end_ratio=speech_end_ratio,
+        min_voice_seconds=speech_start_seconds,
+        min_silence_seconds=speech_end_seconds
+    )
+
+    # ========================================================
+    # STATE
+    # ========================================================
+
+    state = STATE_LISTENING
+
+    audio_buffer: List[int] = []
+
+    wait_command_start = None
+    command_start_time = None
+
+    cooldown_until = None
+
+    # ========================================================
+    # STATE HELPERS
+    # ========================================================
+
+    def clear_command_buffers() -> None:
+
+        audio_buffer.clear()
+        vad_buffer.clear()
+
+    def enter_listening(
+        reason: str = ""
+    ) -> None:
+
+        nonlocal state
+        nonlocal wait_command_start
+        nonlocal command_start_time
+        nonlocal cooldown_until
+
+        clear_command_buffers()
+
+        wait_command_start = None
+        command_start_time = None
+        cooldown_until = None
+
+        speech_gate.reset()
+
+        state = STATE_LISTENING
+
+        if reason:
 
             print(
-                "[SPEECH] Speech detected"
-            )
-
-            self.command_audio = [
-                audio.copy()
-            ]
-
-            self.speech_start_time = time.monotonic()
-
-            self.last_speech_time = time.monotonic()
-
-            self.speech_candidate_start = (
-                time.monotonic()
-            )
-
-            self.set_state(
-                RECORDING
+                "[LISTENER] "
+                f"In ascolto wake word "
+                f"({reason})"
             )
 
         else:
 
-            # Keep a small amount of audio so that
-            # the beginning of speech is not lost.
-
-            self.command_audio.append(
-                audio.copy()
+            print(
+                "[LISTENER] "
+                "In ascolto wake word"
             )
 
-            # Keep approximately 300 ms pre-roll.
+    def enter_cooldown(
+        reason: str
+    ) -> None:
 
-            max_blocks = int(
-                0.30 / (BLOCK_MS / 1000)
+        nonlocal state
+        nonlocal wait_command_start
+        nonlocal command_start_time
+        nonlocal cooldown_until
+
+        clear_command_buffers()
+
+        wait_command_start = None
+        command_start_time = None
+
+        cooldown_until = (
+            time.monotonic()
+            + wakeword_cooldown_sec
+        )
+
+        state = STATE_COOLDOWN
+
+        print(
+            "[LISTENER] "
+            f"Cooldown ({reason})"
+        )
+
+    # ========================================================
+    # SECONDARY WEBRTC VAD
+    # ========================================================
+
+    def process_webrtc_vad(
+        pcm_np: np.ndarray
+    ) -> bool:
+
+        vad_buffer.extend(
+            pcm_np.tolist()
+        )
+
+        speech_detected = False
+
+        while (
+            len(vad_buffer)
+            >= vad_frame_length
+        ):
+
+            frame = vad_buffer[
+                :vad_frame_length
+            ]
+
+            del vad_buffer[
+                :vad_frame_length
+            ]
+
+            frame_bytes = np.asarray(
+                frame,
+                dtype=np.int16
+            ).tobytes()
+
+            try:
+
+                if vad.is_speech(
+                    frame_bytes,
+                    TARGET_SAMPLE_RATE
+                ):
+
+                    speech_detected = True
+
+            except Exception:
+
+                pass
+
+        return speech_detected
+
+    # ========================================================
+    # READ AUDIO
+    # ========================================================
+
+    def get_next_audio_chunk():
+
+        try:
+
+            return mic_queue.get(
+                timeout=0.25
             )
 
-            if len(self.command_audio) > max_blocks:
+        except queue.Empty:
 
-                self.command_audio = (
-                    self.command_audio[-max_blocks:]
+            return None
+
+    # ========================================================
+    # INITIAL STATE
+    # ========================================================
+
+    enter_listening(
+        "avvio"
+    )
+
+    # ========================================================
+    # MAIN LOOP
+    # ========================================================
+
+    try:
+
+        while not stop_event.is_set():
+
+            # =================================================
+            # WATCHDOG
+            # =================================================
+
+            now = time.monotonic()
+
+            with heartbeat_lock:
+
+                callback_age = (
+                    now
+                    - last_audio_callback
                 )
 
-            # Safety timeout while waiting.
+            if (
+                callback_age
+                >= audio_watchdog_seconds
+            ):
+
+                print(
+                    "[AUDIO] "
+                    "WATCHDOG: callback audio fermo "
+                    f"da {callback_age:.2f}s"
+                )
+
+                if not restart_audio_stream(
+                    "watchdog callback"
+                ):
+
+                    stop_event.set()
+
+                    break
+
+                enter_listening(
+                    "audio stream recuperato"
+                )
+
+                continue
+
+            # =================================================
+            # AUDIO
+            # =================================================
+
+            pcm_np = get_next_audio_chunk()
+
+            if pcm_np is None:
+
+                continue
+
+            now = time.monotonic()
+
+            # =================================================
+            # OPENWAKEWORD
+            # =================================================
+
+            try:
+
+                prediction = model.predict(
+                    pcm_np
+                )
+
+                score = prediction.get(
+                    model_name,
+                    0.0
+                )
+
+            except Exception as exc:
+
+                print(
+                    "[OPENWAKEWORD] "
+                    f"Errore predict: {exc}"
+                )
+
+                continue
 
             if (
-                time.monotonic()
-                - self.state_start
-                > MAX_COMMAND_SECONDS
+                debug_wakeword
+                and score >= 0.05
             ):
+
+                print(
+                    "[OPENWAKEWORD] "
+                    f"score={score:.3f}"
+                )
+
+            # =================================================
+            # COOLDOWN
+            # =================================================
+
+            if state == STATE_COOLDOWN:
+
+                if (
+                    cooldown_until is not None
+                    and now >= cooldown_until
+                ):
+
+                    enter_listening(
+                        "cooldown terminato"
+                    )
+
+                continue
+
+            # =================================================
+            # LISTENING
+            # =================================================
+
+            if state == STATE_LISTENING:
+
+                if score < threshold:
+
+                    continue
 
                 print()
 
                 print(
-                    "[WAIT] Command timeout"
+                    "[LISTENER] "
+                    "Wake word rilevata! "
+                    f"score={score:.3f}"
                 )
 
-                self.set_state(
-                    LISTENING
+                print()
+
+                play_beep()
+
+                clear_command_buffers()
+
+                # Nuova calibrazione del rumore
+                # dopo il beep.
+
+                speech_gate.reset()
+
+                wait_command_start = (
+                    time.monotonic()
                 )
 
-    # --------------------------------------------------------
-    # PROCESS RECORDING
-    # --------------------------------------------------------
+                state = STATE_WAIT_COMMAND
 
-    def process_recording(self, audio):
+                print(
+                    "[LISTENER] "
+                    "Attendo voce..."
+                )
 
-        channel = audio[:, 0]
+                continue
 
-        rms = self.speech_gate.rms(
-            channel
-        )
+            # =================================================
+            # WAIT COMMAND
+            # =================================================
 
-        ratio = self.speech_gate.ratio(
-            rms
-        )
+            if state == STATE_WAIT_COMMAND:
 
-        self.command_audio.append(
-            audio.copy()
-        )
+                audio_buffer.extend(
+                    pcm_np.tolist()
+                )
 
-        now = time.monotonic()
+                # VAD solo diagnostico.
 
-        # ----------------------------------------------------
-        # SPEECH ACTIVE
-        # ----------------------------------------------------
-
-        if ratio >= SPEECH_END_RATIO:
-
-            self.last_speech_time = now
-
-        # ----------------------------------------------------
-        # SPEECH ENDED
-        # ----------------------------------------------------
-
-        silence_time = (
-            now - self.last_speech_time
-        )
-
-        if silence_time >= SPEECH_END_TIME:
-
-            print()
-
-            print(
-                f"[SPEECH] End detected "
-                f"(silence={silence_time:.2f}s)"
-            )
-
-            self.finish_command()
-
-            return
-
-        # ----------------------------------------------------
-        # MAX COMMAND
-        # ----------------------------------------------------
-
-        command_time = (
-            now - self.speech_start_time
-        )
-
-        if command_time >= MAX_COMMAND_SECONDS:
-
-            print()
-
-            print(
-                "[RECORD] Maximum command time"
-            )
-
-            self.finish_command()
-
-            return
-
-        print(
-            f"[REC] RMS={rms:.1f} "
-            f"ratio={ratio:.2f} "
-            f"silence={silence_time:.2f}s",
-            end="\r"
-        )
-
-    # --------------------------------------------------------
-    # FINISH COMMAND
-    # --------------------------------------------------------
-
-    def finish_command(self):
-
-        if not self.command_audio:
-
-            self.set_state(
-                LISTENING
-            )
-
-            return
-
-        audio = np.concatenate(
-            self.command_audio,
-            axis=0
-        )
-
-        duration = (
-            len(audio)
-            / TARGET_SAMPLE_RATE
-        )
-
-        print()
-
-        print(
-            f"[RECORD] Command audio: "
-            f"{duration:.2f}s"
-        )
-
-        # ----------------------------------------------------
-        # SAVE TEMP WAV
-        # ----------------------------------------------------
-
-        filename = (
-            "/tmp/keyvoice_command.wav"
-        )
-
-        try:
-
-            import soundfile as sf
-
-            # Use channel 0 only for Vosk.
-
-            mono = audio[:, 0]
-
-            sf.write(
-                filename,
-                mono,
-                TARGET_SAMPLE_RATE,
-                subtype="PCM_16"
-            )
-
-            print(
-                f"[RECORD] Saved: {filename}"
-            )
-
-        except Exception as e:
-
-            print(
-                f"[RECORD] Save error: {e}"
-            )
-
-        # ----------------------------------------------------
-        # HERE WILL COME VOSK
-        # ----------------------------------------------------
-
-        print(
-            "[RECORD] Ready for Vosk processing"
-        )
-
-        self.set_state(
-            COOLDOWN
-        )
-
-        self.cooldown_start = time.monotonic()
-
-    # --------------------------------------------------------
-    # PROCESS COOLDOWN
-    # --------------------------------------------------------
-
-    def process_cooldown(self, audio):
-
-        if (
-            time.monotonic()
-            - self.cooldown_start
-            > 0.8
-        ):
-
-            self.reset_command()
-
-            self.set_state(
-                LISTENING
-            )
-
-    # --------------------------------------------------------
-    # MAIN PROCESSOR
-    # --------------------------------------------------------
-
-    def process_audio(self, audio):
-
-        if self.state == LISTENING:
-
-            self.process_listening(
-                audio
-            )
-
-        elif self.state == WAIT_COMMAND:
-
-            self.process_wait_command(
-                audio
-            )
-
-        elif self.state == RECORDING:
-
-            self.process_recording(
-                audio
-            )
-
-        elif self.state == COOLDOWN:
-
-            self.process_cooldown(
-                audio
-            )
-
-    # --------------------------------------------------------
-    # RUN
-    # --------------------------------------------------------
-
-    def run(self):
-
-        print()
-        print(
-            "========================================"
-        )
-        print(
-            " KeyVoice Wake Word Listener"
-        )
-        print(
-            "========================================"
-        )
-        print(
-            f"Sample rate : {TARGET_SAMPLE_RATE}"
-        )
-        print(
-            f"Channels    : {CHANNELS}"
-        )
-        print(
-            f"Wake word   : {WAKEWORD_MODEL}"
-        )
-        print(
-            f"Threshold   : {WAKEWORD_THRESHOLD}"
-        )
-        print(
-            f"Start ratio : {SPEECH_START_RATIO}"
-        )
-        print(
-            f"End ratio   : {SPEECH_END_RATIO}"
-        )
-        print()
-        print(
-            "[LISTENER] In ascolto..."
-        )
-
-        with sd.InputStream(
-            device=self.device,
-            samplerate=DEVICE_SAMPLE_RATE,
-            channels=CHANNELS,
-            dtype="int16",
-            blocksize=BLOCK_SIZE,
-            callback=self.audio_callback,
-            latency="low"
-        ):
-
-            while True:
-
-                try:
-
-                    audio = self.audio_queue.get(
-                        timeout=1.0
+                vad_result = (
+                    process_webrtc_vad(
+                        pcm_np
                     )
+                )
 
-                except queue.Empty:
+                speech_detected = (
+                    speech_gate.process(
+                        pcm_np,
+                        now
+                    )
+                )
 
-                    if not self.watchdog.check():
+                if speech_detected:
 
-                        print(
-                            "[WATCHDOG] Audio stream timeout"
-                        )
+                    command_start_time = now
+
+                    state = STATE_RECORDING
+
+                    print(
+                        "[LISTENER] "
+                        "Inizio registrazione comando"
+                    )
 
                     continue
 
-                self.process_audio(
-                    audio
+                if wait_command_start is None:
+
+                    enter_cooldown(
+                        "WAIT non valido"
+                    )
+
+                    continue
+
+                wait_elapsed = (
+                    now
+                    - wait_command_start
                 )
 
+                if (
+                    wait_elapsed
+                    >= voice_start_timeout
+                ):
 
-# ============================================================
-# MAIN
-# ============================================================
+                    print(
+                        "[LISTENER] "
+                        "Nessuna voce dopo wake word"
+                    )
 
-if __name__ == "__main__":
+                    enter_cooldown(
+                        "nessun comando"
+                    )
 
-    try:
+                continue
 
-        listener = WakeWordListener()
+            # =================================================
+            # RECORDING
+            # =================================================
 
-        listener.run()
+            if state == STATE_RECORDING:
 
-    except KeyboardInterrupt:
+                audio_buffer.extend(
+                    pcm_np.tolist()
+                )
 
-        print()
+                vad_result = (
+                    process_webrtc_vad(
+                        pcm_np
+                    )
+                )
+
+                speech_detected = (
+                    speech_gate.process(
+                        pcm_np,
+                        now
+                    )
+                )
+
+                if debug_wakeword:
+
+                    print(
+                        "[DSP] "
+                        f"{speech_gate.debug_info(pcm_np)} "
+                        f"webrtc={vad_result}"
+                    )
+
+                # ------------------------------------------------
+                # COMANDO TERMINATO
+                #
+                # speech_gate diventa False solo quando
+                # l'energia rimane sotto la soglia di release
+                # per speech_end_seconds.
+                # ------------------------------------------------
+
+                if not speech_detected:
+
+                    print(
+                        "[LISTENER] "
+                        "Fine registrazione: "
+                        "silenzio DSP"
+                    )
+
+                    break_recording = True
+
+                else:
+
+                    break_recording = False
+
+                # ------------------------------------------------
+                # MAX COMMAND TIME
+                # ------------------------------------------------
+
+                if command_start_time is None:
+
+                    enter_cooldown(
+                        "stato recording non valido"
+                    )
+
+                    continue
+
+                command_elapsed = (
+                    now
+                    - command_start_time
+                )
+
+                if (
+                    command_elapsed
+                    >= max_command_seconds
+                ):
+
+                    print(
+                        "[LISTENER] "
+                        "Timeout massimo comando "
+                        f"({command_elapsed:.2f}s)"
+                    )
+
+                    break_recording = True
+
+                if not break_recording:
+
+                    continue
+
+                # =================================================
+                # POST BUFFER
+                # =================================================
+
+                post_samples = int(
+                    post_buffer_seconds
+                    * TARGET_SAMPLE_RATE
+                )
+
+                post_buffer: List[int] = []
+
+                post_deadline = (
+                    time.monotonic()
+                    \+ 1.0
+                )
+
+                while (
+                    len(post_buffer)
+                    < post_samples
+                    and not stop_event.is_set()
+                    and time.monotonic()
+                    < post_deadline
+                ):
+
+                    pcm_post = (
+                        get_next_audio_chunk()
+                    )
+
+                    if pcm_post is None:
+
+                        continue
+
+                    try:
+
+                        model.predict(
+                            pcm_post
+                        )
+
+                    except Exception:
+
+                        pass
+
+                    post_buffer.extend(
+                        pcm_post.tolist()
+                    )
+
+                audio_buffer.extend(
+                    post_buffer
+                )
+
+                # =================================================
+                # COMMAND DURATION
+                # =================================================
+
+                duration = (
+                    len(audio_buffer)
+                    / TARGET_SAMPLE_RATE
+                )
+
+                print(
+                    "[LISTENER] "
+                    f"Audio comando: "
+                    f"{duration:.2f}s"
+                )
+
+                # =================================================
+                # SEND TO VOSK
+                # =================================================
+
+                min_samples = int(
+                    min_command_seconds
+                    * TARGET_SAMPLE_RATE
+                )
+
+                if (
+                    len(audio_buffer)
+                    >= min_samples
+                ):
+
+                    buffer_to_send = list(
+                        audio_buffer
+                    )
+
+                    audio_queue.put(
+                        (
+                            buffer_to_send,
+                            TARGET_SAMPLE_RATE
+                        )
+                    )
+
+                    print(
+                        "[LISTENER] "
+                        "Buffer inviato a Vosk"
+                    )
+
+                    if save_debug:
+
+                        save_debug_audio(
+                            buffer_to_send,
+                            TARGET_SAMPLE_RATE
+                        )
+
+                else:
+
+                    print(
+                        "[LISTENER] "
+                        "Audio troppo corto, ignoro"
+                    )
+
+                enter_cooldown(
+                    "comando completato"
+                )
+
+                continue
+
+            # =================================================
+            # UNKNOWN STATE
+            # =================================================
+
+            print(
+                "[LISTENER] "
+                f"Stato sconosciuto: {state}"
+            )
+
+            enter_cooldown(
+                "reset stato"
+            )
+
+    except Exception as exc:
+
         print(
-            "[EXIT] Listener stopped"
+            "[OPENWAKEWORD] "
+            f"Errore listener: {exc}"
         )
 
-    except Exception as e:
+        stop_event.set()
+
+    finally:
 
         print(
-            f"[FATAL] {e}"
+            "[OPENWAKEWORD] "
+            "Chiusura listener"
         )
 
-        raise
+        if stream is not None:
+
+            try:
+                stream.abort()
+            except Exception:
+                pass
+
+            try:
+                stream.close()
+            except Exception:
+                pass
+    ```
