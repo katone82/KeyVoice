@@ -316,3 +316,13 @@ ReadCMD: cmdid: 208, resid: 33, payload: [0, 250, 152, 196, 71, 0, 0, 0, 0, 136,
 AEC_SPENERGY_VALUES            (100657.953125, 0.0, 15745.3828125, 100657.953125)
 DoA degrees: [144.2, 307.0, 127.2, 144.2]
 Speech: [True, False, True, True]
+
+#####verifica telemetria
+sudo .venv/bin/python xvf3800_tool.py test --device hw:2,0 --seconds 20 --channels 2
+[TEST] duration=20s device=hw:2,0 rate=16000 channels=2
+[TEST] Speak normally from different directions during the recording.
+arecord: main:831: audio open error: Device or resource busy
+[TELEMETRY ERROR] Unknown status code: 68
+[OK] audio:     /home/homeassistant/KeyVoice/xvf3800-tool/recordings/20260904_224733/xvf3800.wav
+[OK] telemetry: /home/homeassistant/KeyVoice/xvf3800-tool/recordings/20260904_224733/telemetry.csv
+[TEST] Now you have a real synchronized audio + DSP telemetry sample.
