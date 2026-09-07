@@ -326,3 +326,26 @@ arecord: main:831: audio open error: Device or resource busy
 [OK] audio:     /home/homeassistant/KeyVoice/xvf3800-tool/recordings/20260904_224733/xvf3800.wav
 [OK] telemetry: /home/homeassistant/KeyVoice/xvf3800-tool/recordings/20260904_224733/telemetry.csv
 [TEST] Now you have a real synchronized audio + DSP telemetry sample.
+
+
+
+
+
+
+la card per riprodurre i suoni
+aplay -D plughw:3,0 sounds/wake.wav
+
+aplay -l
+**** List of PLAYBACK Hardware Devices ****
+card 0: vc4hdmi0 [vc4-hdmi-0], device 0: MAI PCM i2s-hifi-0 [MAI PCM i2s-hifi-0]
+Subdevices: 1/1
+Subdevice #0: subdevice #0
+card 1: vc4hdmi1 [vc4-hdmi-1], device 0: MAI PCM i2s-hifi-0 [MAI PCM i2s-hifi-0]
+Subdevices: 1/1
+Subdevice #0: subdevice #0
+card 2: Array [reSpeaker XVF3800 4-Mic Array], device 0: USB Audio [USB Audio]
+Subdevices: 1/1
+Subdevice #0: subdevice #0
+card 3: S4 [Sound Blaster Play! 4], device 0: USB Audio [USB Audio]
+Subdevices: 1/1
+Subdevice #0: subdevice #0
