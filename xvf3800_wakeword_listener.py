@@ -147,7 +147,7 @@ COMMAND_WAV = "/tmp/keyvoice_command.wav"
 
 # Percorso relativo alla cartella del progetto, come xvf_host.py
 # poco sotto. Verrà risolto in assoluto subito dopo.
-BEEP_FILE = "./sound/wake.wav"
+BEEP_FILE = "./sounds/wake.wav"
 BEEP_DEVICE = "plughw:3,0"
 
 
@@ -829,6 +829,11 @@ class WakeWordListener:
         # solo quando un chunk da 80ms è stato effettivamente
         # processato), usato per il debug periodico.
         self.last_wake_score = 0.0
+
+        # Battito cardiaco leggero (una riga ogni ALIVE_LOG_INTERVAL
+        # secondi) per confermare che il processo è vivo anche con
+        # DEBUG_LOGGING spento, senza inondare la console.
+        self.last_alive_print = 0.0
 
     # ========================================================
     # AUDIO DEVICE
