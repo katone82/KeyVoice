@@ -27,6 +27,11 @@ BLOCK_SIZE = int(DEVICE_SAMPLE_RATE * BLOCK_MS / 1000)
 WAKEWORD = "hey_jarvis"
 WAKE_THRESHOLD = 0.35
 
+# Stampa lo score della wake word anche quando resta sotto
+# soglia, per poter tarare WAKE_THRESHOLD osservando i valori
+# reali durante l'uso.
+WAKE_DEBUG_INTERVAL = 1.0
+
 # ------------------------------------------------------------
 # Speech gate RMS
 # ------------------------------------------------------------
@@ -60,7 +65,13 @@ XVF_HOST_PATH = "./xvf3800-tool/vendor/xvf_host.py"
 
 XVF_POLL_INTERVAL = 0.10
 
-DIRECTION_MIN_DOMINANCE = 1.50
+# NOTA: prima di questo fix il rapporto di dominanza era quasi
+# sempre ~1.0 perche' uno dei beam riportati dal device
+# duplicava esattamente il beam dominante (vedi fix in
+# XVF3800Telemetry._worker). Con la deduplica il rapporto reale
+# osservato in ambiente tipico e' spesso 1.1-1.3x: la soglia va
+# quindi ritarata sul campo guardando i nuovi log [XVF].
+DIRECTION_MIN_DOMINANCE = 1.2
 DIRECTION_MIN_ENERGY = 1.0
 
 DIRECTION_CONFIRMATIONS = 3
@@ -71,6 +82,11 @@ DIRECTION_LOST_GRACE_SECONDS = 0.18
 
 # Stampa diagnostica telemetria ogni N secondi
 XVF_DEBUG_INTERVAL = 0.50
+
+# Silenzia i log molto verbosi "ReadCMD: ..." generati
+# internamente da xvf_host.py. Metti a False per riattivarli
+# in fase di debug del protocollo USB.
+XVF_SILENCE_VENDOR_LOGS = True
 
 # ------------------------------------------------------------
 # Audio
@@ -112,6 +128,12 @@ except Exception as e:
         f"da {XVF_HOST_PATH}: {e}"
     )
     raise
+
+if XVF_SILENCE_VENDOR_LOGS:
+    # xvf_host.py chiama print() senza qualificatore: assegnando
+    # 'print' nel namespace del modulo, ogni print() interno a
+    # xvf_host risolve su questo no-op invece che sul builtin.
+    xvf_host.print = lambda *args, **kwargs: None
 
 
 # ============================================================
@@ -245,6 +267,39 @@ class XVF3800Telemetry:
 
     # --------------------------------------------------------
 
+    @staticmethod
+    def _dedupe_beams(degrees, energies):
+        """
+        Alcuni indici riportati dal device (es. l'ultimo slot)
+        duplicano semplicemente il beam attualmente dominante
+        invece di rappresentare una direzione fisica distinta.
+        Se non li scartiamo, il "secondo classificato" per
+        energia risulta sempre identico al dominante e il
+        rapporto di dominanza resta artificialmente ~1.0,
+        impedendo qualunque lock direzionale.
+
+        Ritorna la lista di (indice_originale, angolo, energia)
+        con i duplicati (stesso angolo e stessa energia, entro
+        una tolleranza minima) collassati in una sola voce.
+        """
+
+        seen = set()
+        unique = []
+
+        for i, (ang, en) in enumerate(zip(degrees, energies)):
+
+            key = (round(ang, 1), round(en, 1))
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+            unique.append((i, ang, en))
+
+        return unique
+
+    # --------------------------------------------------------
+
     def _worker(self):
 
         while self.running:
@@ -280,21 +335,29 @@ class XVF3800Telemetry:
                     for value in energies
                 ]
 
-                dominant = max(
-                    range(len(energies)),
-                    key=lambda i: energies[i]
+                unique_beams = self._dedupe_beams(
+                    degrees, energies
                 )
 
-                dominant_energy = energies[dominant]
+                if not unique_beams:
+                    raise RuntimeError(
+                        "Telemetry vuota dopo dedup"
+                    )
 
-                ordered = sorted(
-                    energies,
-                    reverse=True
+                dominant, dominant_angle, dominant_energy = max(
+                    unique_beams,
+                    key=lambda item: item[2]
                 )
+
+                other_energies = [
+                    en
+                    for idx, _, en in unique_beams
+                    if idx != dominant
+                ]
 
                 second_energy = (
-                    ordered[1]
-                    if len(ordered) > 1
+                    max(other_energies)
+                    if other_energies
                     else 0.0
                 )
 
@@ -311,7 +374,7 @@ class XVF3800Telemetry:
                     self.dominant_beam = dominant
 
                     self.dominant_angle = (
-                        degrees[dominant]
+                        dominant_angle
                     )
 
                     self.dominant_energy = (
@@ -350,7 +413,8 @@ class XVF3800Telemetry:
                     print(
                         f"[XVF] {beam_text} | "
                         f"DOM=B{dominant} "
-                        f"{degrees[dominant]:.1f}° | "
+                        f"{dominant_angle:.1f}° | "
+                        f"2nd={second_energy:.0f} "
                         f"ratio={ratio:.2f}"
                     )
 
@@ -623,6 +687,8 @@ class WakeWordListener:
 
         self.cooldown_until = 0.0
 
+        self.last_wake_debug = 0.0
+
     # ========================================================
     # AUDIO DEVICE
     # ========================================================
@@ -852,6 +918,20 @@ class WakeWordListener:
             WAKEWORD,
             0.0
         )
+
+        now = time.monotonic()
+
+        if (
+            now - self.last_wake_debug
+            >= WAKE_DEBUG_INTERVAL
+        ):
+
+            self.last_wake_debug = now
+
+            print(
+                f"[WAKE-DEBUG] score={score:.3f} "
+                f"threshold={WAKE_THRESHOLD}"
+            )
 
         if score >= WAKE_THRESHOLD:
 
