@@ -1061,11 +1061,14 @@ class WakeWordListener:
             else 0.0
         )
 
+        direction_status = (
+            "YES" if direction_active else "NO"
+        )
+
         print(
-            f"[REC] "
-            f"RMS={rms:6.0f} "
+            f"[REC] RMS={rms:6.0f} "
             f"ratio={ratio:4.2f} "
-            f"dir={'YES' if direction_active else 'NO ':3s} "
+            f"dir={direction_status:3s} "
             f"DOM={direction:6.1f}° "
             f"silence={silence_time:4.2f}s"
         )
@@ -1191,13 +1194,15 @@ class WakeWordListener:
             print(
                 f"[COMMAND] Durata: {duration:.2f}s"
             )
+            command_direction = (
+                self.locked_direction
+                if self.locked_direction is not None
+                else -1.0
+            )
+
             print(
                 f"[COMMAND] Direzione: "
-                f"{(
-                    self.locked_direction
-                    if self.locked_direction is not None
-                    else -1
-                ):.1f}°"
+                f"{command_direction:.1f}°"
             )
             print(
                 "================================================"
