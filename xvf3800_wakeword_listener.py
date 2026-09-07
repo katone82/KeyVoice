@@ -17,6 +17,14 @@ from openwakeword.model import Model
 # CONFIGURAZIONE
 # ============================================================
 
+# Log dettagliati (telemetria XVF ad ogni poll, score wake word
+# periodico, riga RMS/direzione ad ogni blocco durante la
+# registrazione). Lascia False per vedere solo i punti cardine
+# della pipeline (wake, direzione, inizio/fine comando, salvataggio
+# WAV). Metti a True solo quando serve ritarare soglie o
+# diagnosticare un problema.
+DEBUG_LOGGING = False
+
 TARGET_SAMPLE_RATE = 16000
 DEVICE_SAMPLE_RATE = 16000
 CHANNELS = 2
@@ -473,31 +481,33 @@ class XVF3800Telemetry:
                     )
 
                 # ------------------------------------------------
-                # DEBUG TELEMETRIA
+                # DEBUG TELEMETRIA (solo se DEBUG_LOGGING attivo)
                 # ------------------------------------------------
 
-                now = time.monotonic()
+                if DEBUG_LOGGING:
 
-                if (
-                    now - self.last_debug
-                    >= XVF_DEBUG_INTERVAL
-                ):
+                    now = time.monotonic()
 
-                    self.last_debug = now
+                    if (
+                        now - self.last_debug
+                        >= XVF_DEBUG_INTERVAL
+                    ):
 
-                    beam_text = " | ".join(
-                        f"B{i}={degrees[i]:6.1f}° "
-                        f"E={energies[i]:.0f}"
-                        for i in range(count)
-                    )
+                        self.last_debug = now
 
-                    print(
-                        f"[XVF] {beam_text} | "
-                        f"DOM=B{dominant} "
-                        f"{dominant_angle:.1f}° | "
-                        f"2nd={second_energy:.0f} "
-                        f"ratio={ratio:.2f}"
-                    )
+                        beam_text = " | ".join(
+                            f"B{i}={degrees[i]:6.1f}° "
+                            f"E={energies[i]:.0f}"
+                            for i in range(count)
+                        )
+
+                        print(
+                            f"[XVF] {beam_text} | "
+                            f"DOM=B{dominant} "
+                            f"{dominant_angle:.1f}° | "
+                            f"2nd={second_energy:.0f} "
+                            f"ratio={ratio:.2f}"
+                        )
 
             except Exception as e:
 
@@ -879,29 +889,50 @@ class WakeWordListener:
 
         if not os.path.isfile(BEEP_FILE):
 
-            # Già segnalato all'avvio; evitiamo di ripetere
-            # l'errore ad ogni singola wake word rilevata.
+            print(
+                f"[BEEP] File non trovato: {BEEP_FILE}"
+            )
+
             return
 
-        try:
+        def _run():
 
-            subprocess.Popen(
-                [
-                    "aplay",
-                    "-q",
-                    "-D",
-                    BEEP_DEVICE,
-                    BEEP_FILE
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
+            try:
 
-        except Exception as e:
+                result = subprocess.run(
+                    [
+                        "aplay",
+                        "-q",
+                        "-D",
+                        BEEP_DEVICE,
+                        BEEP_FILE
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5.0
+                )
 
-            print(
-                f"[BEEP] Errore: {e}"
-            )
+                if result.returncode != 0:
+
+                    print(
+                        f"[BEEP] aplay fallito "
+                        f"(device={BEEP_DEVICE}, "
+                        f"file={BEEP_FILE}): "
+                        f"{result.stderr.strip()}"
+                    )
+
+            except Exception as e:
+
+                print(
+                    f"[BEEP] Errore: {e}"
+                )
+
+        # Eseguito in thread separato per non bloccare il loop
+        # audio principale per la durata della riproduzione.
+        threading.Thread(
+            target=_run,
+            daemon=True
+        ).start()
 
     # ========================================================
     # NOISE CALIBRATION
@@ -1088,7 +1119,8 @@ class WakeWordListener:
         now = time.monotonic()
 
         if (
-            now - self.last_wake_debug
+            DEBUG_LOGGING
+            and now - self.last_wake_debug
             >= WAKE_DEBUG_INTERVAL
         ):
 
@@ -1292,34 +1324,36 @@ class WakeWordListener:
             self.last_speech_time = now
 
         # ----------------------------------------------------
-        # DEBUG
+        # DEBUG (solo se DEBUG_LOGGING attivo)
         # ----------------------------------------------------
 
-        data = self.xvf.snapshot()
+        if DEBUG_LOGGING:
 
-        direction = (
-            data["dominant_angle"]
-            if data["dominant_angle"] is not None
-            else -1
-        )
+            data = self.xvf.snapshot()
 
-        silence_time = (
-            now - self.last_speech_time
-            if self.last_speech_time is not None
-            else 0.0
-        )
+            direction = (
+                data["dominant_angle"]
+                if data["dominant_angle"] is not None
+                else -1
+            )
 
-        direction_status = (
-            "YES" if direction_active else "NO"
-        )
+            silence_time = (
+                now - self.last_speech_time
+                if self.last_speech_time is not None
+                else 0.0
+            )
 
-        print(
-            f"[REC] RMS={rms:6.0f} "
-            f"ratio={ratio:4.2f} "
-            f"dir={direction_status:3s} "
-            f"DOM={direction:6.1f}° "
-            f"silence={silence_time:4.2f}s"
-        )
+            direction_status = (
+                "YES" if direction_active else "NO"
+            )
+
+            print(
+                f"[REC] RMS={rms:6.0f} "
+                f"ratio={ratio:4.2f} "
+                f"dir={direction_status:3s} "
+                f"DOM={direction:6.1f}° "
+                f"silence={silence_time:4.2f}s"
+            )
 
         # ----------------------------------------------------
         # FINE COMANDO
