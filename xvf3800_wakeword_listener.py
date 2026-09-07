@@ -39,8 +39,17 @@ WAKE_DEBUG_INTERVAL = 1.0
 SPEECH_START_RATIO = 2.5
 SPEECH_END_RATIO = 1.5
 
-SPEECH_START_TIME = 0.24
-SPEECH_END_TIME = 0.50
+# Con la direzione già bloccata dalla wake word, la sorgente è
+# considerata attendibile fin da subito: basta un solo blocco di
+# conferma (~1 ciclo audio) invece dei 0.24s precedenti, che
+# tagliavano l'inizio della parola. Non azzerare del tutto per
+# evitare che un singolo blocco rumoroso avvii una registrazione.
+SPEECH_START_TIME = 0.03
+
+# Pausa "concreta" richiesta dalla stessa direzione prima di
+# considerare finito il comando. Leggermente piu' alta di prima
+# per non tagliare respiri o micro-pause naturali nel parlato.
+SPEECH_END_TIME = 0.60
 
 NOISE_CALIBRATION_SECONDS = 2.0
 NOISE_MIN_FLOOR = 50.0
@@ -55,7 +64,13 @@ POST_WAKE_IGNORE_SECONDS = 0.40
 COMMAND_TIMEOUT_SECONDS = 4.0
 MAX_COMMAND_SECONDS = 6.0
 
-PRE_ROLL_SECONDS = 0.30
+# Con la direzione bloccata dalla wake word e la conferma
+# vocale quasi istantanea (SPEECH_START_TIME), non serve piu'
+# un pre-roll lungo per compensare il ritardo di conferma.
+# Lo teniamo comunque a mezzo secondo come cuscinetto per
+# l'attacco morbido della voce (il volume sale gradualmente
+# prima di superare SPEECH_START_RATIO).
+PRE_ROLL_SECONDS = 0.50
 
 # ------------------------------------------------------------
 # XVF3800
@@ -80,6 +95,16 @@ DIRECTION_ANGLE_TOLERANCE = 35.0
 
 DIRECTION_LOST_GRACE_SECONDS = 0.18
 
+# Quando scatta la wake word, cerchiamo nello storico telemetria
+# la lettura di direzione più energica negli ultimi N secondi:
+# copre la coda dell'utterance "hey jarvis" (l'engine di wake
+# word finalizza il riconoscimento con un piccolo ritardo dopo
+# che la frase è stata pronunciata).
+WAKE_DIRECTION_LOOKBACK_SECONDS = 0.6
+
+# Quanta storia di telemetria conserviamo per il lookback sopra.
+XVF_HISTORY_SECONDS = 2.0
+
 # Stampa diagnostica telemetria ogni N secondi
 XVF_DEBUG_INTERVAL = 0.50
 
@@ -97,8 +122,7 @@ INPUT_DEVICE_NAME = "reSpeaker XVF3800 4-Mic Array"
 COMMAND_WAV = "/tmp/keyvoice_command.wav"
 
 BEEP_FILE = "/home/homeassistant/KeyVoice/sounds/wake.wav"
-BEEP_DEVICE = "plughw:4,0"
-
+BEEP_DEVICE = "plughw:3,0"
 
 # ============================================================
 # PATH XVF
@@ -188,6 +212,11 @@ class XVF3800Telemetry:
         self.error_count = 0
 
         self.last_debug = 0.0
+
+        # Storico (timestamp, angolo, energia, ratio, valido) per
+        # poter recuperare, al momento della wake word, la
+        # direzione dominante di qualche centinaio di ms prima.
+        self.history = collections.deque(maxlen=200)
 
     # --------------------------------------------------------
 
@@ -366,6 +395,13 @@ class XVF3800Telemetry:
                     max(second_energy, 1.0)
                 )
 
+                valid = (
+                    dominant_energy
+                    >= DIRECTION_MIN_ENERGY
+                    and ratio
+                    >= DIRECTION_MIN_DOMINANCE
+                )
+
                 with self.lock:
 
                     self.azimuths = degrees
@@ -389,6 +425,16 @@ class XVF3800Telemetry:
 
                     self.last_update = (
                         time.monotonic()
+                    )
+
+                    self.history.append(
+                        (
+                            self.last_update,
+                            dominant_angle,
+                            dominant_energy,
+                            ratio,
+                            valid
+                        )
                     )
 
                 # ------------------------------------------------
@@ -521,6 +567,46 @@ class XVF3800Telemetry:
             distance
             <= DIRECTION_ANGLE_TOLERANCE
         )
+
+    # --------------------------------------------------------
+
+    def recent_direction(self, window_seconds):
+        """
+        Cerca nello storico la lettura di direzione valida più
+        energica negli ultimi `window_seconds`. Serve a catturare
+        la direzione di provenienza della wake word stessa, così
+        il comando successivo può essere filtrato fin da subito
+        su quella direzione, senza dover ricostruire un nuovo
+        lock da zero (che introduce un ritardo e taglia l'inizio
+        della frase).
+
+        Ritorna l'angolo (float) oppure None se nello storico non
+        c'è nessuna lettura valida nella finestra richiesta.
+        """
+
+        now = time.monotonic()
+
+        with self.lock:
+            entries = [
+                entry
+                for entry in self.history
+                if now - entry[0] <= window_seconds
+            ]
+
+        valid_entries = [
+            entry for entry in entries if entry[4]
+        ]
+
+        if not valid_entries:
+            return None
+
+        # entry = (timestamp, angle, energy, ratio, valid)
+        best = max(
+            valid_entries,
+            key=lambda entry: entry[2]
+        )
+
+        return best[1]
 
 
 # ============================================================
@@ -979,7 +1065,13 @@ class WakeWordListener:
         # DIREZIONE
         # --------------------------------------------
 
-        self.update_direction_lock()
+        if self.locked_direction is None:
+
+            # Fallback: la wake word non ha fornito una
+            # direzione affidabile (es. livello troppo basso
+            # nello storico), proviamo a costruirne una da zero
+            # come meccanismo di sicurezza.
+            self.update_direction_lock()
 
         direction_active = (
             self.direction_is_active()
@@ -1481,13 +1573,46 @@ class WakeWordListener:
 
                             self.command_audio = []
 
-                            self.locked_direction = None
-
                             self.direction_candidate = None
 
                             self.direction_confirmations = 0
 
                             self.speech_start_candidate = None
+
+                            # Catturiamo subito la direzione da
+                            # cui è arrivata la wake word stessa:
+                            # il comando verrà accettato solo se
+                            # proviene dalla stessa sorgente,
+                            # senza dover ricostruire un nuovo
+                            # lock da zero (che tagliava l'inizio
+                            # della frase).
+                            wake_angle = (
+                                self.xvf.recent_direction(
+                                    WAKE_DIRECTION_LOOKBACK_SECONDS
+                                )
+                            )
+
+                            self.locked_direction = wake_angle
+
+                            if wake_angle is not None:
+
+                                self.direction_last_valid = (
+                                    time.monotonic()
+                                )
+
+                                print(
+                                    f"[XVF] Direzione wake word: "
+                                    f"{wake_angle:.1f}°"
+                                )
+
+                            else:
+
+                                print(
+                                    "[XVF] Direzione wake word "
+                                    "non disponibile, la "
+                                    "ricostruisco durante "
+                                    "l'attesa del comando..."
+                                )
 
                             print(
                                 "[LISTENER] "
