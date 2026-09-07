@@ -1055,18 +1055,19 @@ class WakeWordListener:
             else -1
         )
 
+        silence_time = (
+            now - self.last_speech_time
+            if self.last_speech_time is not None
+            else 0.0
+        )
+
         print(
             f"[REC] "
             f"RMS={rms:6.0f} "
             f"ratio={ratio:4.2f} "
             f"dir={'YES' if direction_active else 'NO ':3s} "
             f"DOM={direction:6.1f}° "
-            f"silence="
-            f"{(
-                now - self.last_speech_time
-                if self.last_speech_time
-                else 0
-            ):4.2f}s"
+            f"silence={silence_time:4.2f}s"
         )
 
         # ----------------------------------------------------
