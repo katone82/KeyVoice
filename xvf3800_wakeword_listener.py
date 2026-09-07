@@ -21,16 +21,32 @@ TARGET_SAMPLE_RATE = 16000
 DEVICE_SAMPLE_RATE = 16000
 CHANNELS = 2
 
-BLOCK_MS = 30
-BLOCK_SIZE = int(DEVICE_SAMPLE_RATE * BLOCK_MS / 1000)
-
 WAKEWORD = "hey_jarvis"
-WAKE_THRESHOLD = 0.35
+
+# NOTA affidabilità: partiamo da una soglia leggermente più
+# permissiva rispetto a 0.35 ora che il modello riceve chunk
+# audio correttamente allineati (vedi WAKE_CHUNK_SAMPLES sotto).
+# Ritara osservando i valori reali negli score [WAKE-DEBUG].
+WAKE_THRESHOLD = 0.30
+
+# openWakeWord è progettato per ricevere audio in blocchi da
+# esattamente 80ms (1280 campioni a 16kHz): è la dimensione con
+# cui la sua pipeline di melspectrogram + embedding è allineata.
+# Il resto del sistema usa BLOCK_SIZE (30ms) per la granularità
+# del gate RMS/direzionale, quindi bufferizziamo l'audio e lo
+# passiamo al modello di wake word in blocchi separati da questa
+# dimensione, invece di alimentarlo con chunk da 30ms non
+# allineati (che abbassano il punteggio di picco raggiunto e
+# costringono a ripetere la wake word più volte).
+WAKE_CHUNK_SAMPLES = 1280
 
 # Stampa lo score della wake word anche quando resta sotto
 # soglia, per poter tarare WAKE_THRESHOLD osservando i valori
 # reali durante l'uso.
 WAKE_DEBUG_INTERVAL = 1.0
+
+BLOCK_MS = 30
+BLOCK_SIZE = int(DEVICE_SAMPLE_RATE * BLOCK_MS / 1000)
 
 # ------------------------------------------------------------
 # Speech gate RMS
@@ -121,8 +137,11 @@ INPUT_DEVICE_NAME = "reSpeaker XVF3800 4-Mic Array"
 
 COMMAND_WAV = "/tmp/keyvoice_command.wav"
 
-BEEP_FILE = "/home/homeassistant/KeyVoice/sounds/wake.wav"
+# Percorso relativo alla cartella del progetto, come xvf_host.py
+# poco sotto. Verrà risolto in assoluto subito dopo.
+BEEP_FILE = "./sound/wake.wav"
 BEEP_DEVICE = "plughw:3,0"
+
 
 # ============================================================
 # PATH XVF
@@ -158,6 +177,22 @@ if XVF_SILENCE_VENDOR_LOGS:
     # 'print' nel namespace del modulo, ogni print() interno a
     # xvf_host risolve su questo no-op invece che sul builtin.
     xvf_host.print = lambda *args, **kwargs: None
+
+
+# ============================================================
+# PATH BEEP
+# ============================================================
+
+BEEP_FILE = os.path.abspath(
+    os.path.join(SCRIPT_DIR, BEEP_FILE)
+)
+
+if not os.path.isfile(BEEP_FILE):
+    print(
+        f"[BEEP] ATTENZIONE: file beep non trovato: "
+        f"{BEEP_FILE} — il riscontro sonoro alla wake word "
+        f"non verrà riprodotto finché il file non è presente."
+    )
 
 
 # ============================================================
@@ -775,6 +810,16 @@ class WakeWordListener:
 
         self.last_wake_debug = 0.0
 
+        # Buffer per accumulare i campioni (arrivano a blocchi di
+        # BLOCK_SIZE, 30ms) e alimentare openWakeWord in chunk
+        # correttamente allineati da WAKE_CHUNK_SAMPLES (80ms).
+        self.wake_buffer = np.zeros(0, dtype=np.int16)
+
+        # Ultimo score realmente calcolato dal modello (aggiornato
+        # solo quando un chunk da 80ms è stato effettivamente
+        # processato), usato per il debug periodico.
+        self.last_wake_score = 0.0
+
     # ========================================================
     # AUDIO DEVICE
     # ========================================================
@@ -831,6 +876,12 @@ class WakeWordListener:
     # ========================================================
 
     def play_beep(self):
+
+        if not os.path.isfile(BEEP_FILE):
+
+            # Già segnalato all'avvio; evitiamo di ripetere
+            # l'errore ad ogni singola wake word rilevata.
+            return
 
         try:
 
@@ -996,14 +1047,43 @@ class WakeWordListener:
 
         mono = audio[:, 0]
 
-        prediction = self.model.predict(
-            mono
+        # Accumuliamo i campioni ricevuti (blocchi da 30ms) e li
+        # passiamo al modello solo in chunk da esattamente
+        # WAKE_CHUNK_SAMPLES (80ms), la dimensione con cui
+        # openWakeWord è allineato internamente. Un singolo
+        # blocco da 30ms può generare più chunk pronti (o zero,
+        # se non abbiamo ancora accumulato abbastanza campioni).
+        self.wake_buffer = np.concatenate(
+            (self.wake_buffer, mono)
         )
 
-        score = prediction.get(
-            WAKEWORD,
-            0.0
-        )
+        wake_detected = False
+        best_score = 0.0
+
+        while len(self.wake_buffer) >= WAKE_CHUNK_SAMPLES:
+
+            chunk = self.wake_buffer[:WAKE_CHUNK_SAMPLES]
+
+            self.wake_buffer = (
+                self.wake_buffer[WAKE_CHUNK_SAMPLES:]
+            )
+
+            prediction = self.model.predict(
+                chunk
+            )
+
+            score = prediction.get(
+                WAKEWORD,
+                0.0
+            )
+
+            if score > best_score:
+                best_score = score
+
+            if score >= WAKE_THRESHOLD:
+                wake_detected = True
+
+            self.last_wake_score = score
 
         now = time.monotonic()
 
@@ -1015,15 +1095,11 @@ class WakeWordListener:
             self.last_wake_debug = now
 
             print(
-                f"[WAKE-DEBUG] score={score:.3f} "
+                f"[WAKE-DEBUG] score={self.last_wake_score:.3f} "
                 f"threshold={WAKE_THRESHOLD}"
             )
 
-        if score >= WAKE_THRESHOLD:
-
-            return True, score
-
-        return False, score
+        return wake_detected, best_score
 
     # ========================================================
     # WAIT COMMAND
@@ -1500,6 +1576,10 @@ class WakeWordListener:
                 print(
                     f"WAV output  : "
                     f"{COMMAND_WAV}"
+                )
+                print(
+                    f"Beep file   : "
+                    f"{BEEP_FILE}"
                 )
                 print(
                     "================================================"
