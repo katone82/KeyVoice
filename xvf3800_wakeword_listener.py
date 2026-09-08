@@ -825,7 +825,23 @@ class WakeWordListener:
     RECORDING = "RECORDING"
     COOLDOWN = "COOLDOWN"
 
-    def __init__(self):
+    def __init__(
+        self,
+        vosk_audio_queue=None,
+        stop_event=None
+    ):
+
+        # Coda esterna verso cui inoltrare l'audio del comando
+        # catturato, nello stesso formato (buffer, sample_rate)
+        # che vosk_listener.py si aspetta di ricevere. None in
+        # modalità standalone (esecuzione diretta dello script).
+        self.vosk_audio_queue = vosk_audio_queue
+
+        # threading.Event condiviso con gli altri thread di
+        # run_service.py per uno spegnimento cooperativo. None in
+        # modalità standalone: in quel caso resta l'unico modo per
+        # uscire Ctrl+C (KeyboardInterrupt), gestito in run().
+        self.stop_event = stop_event
 
         print(
             f"[INIT] XVF host: "
@@ -1517,6 +1533,10 @@ class WakeWordListener:
 
             return
 
+        # ----------------------------------------------------
+        # PREPARAZIONE AUDIO (sempre eseguita)
+        # ----------------------------------------------------
+
         try:
 
             audio = np.concatenate(
@@ -1524,10 +1544,7 @@ class WakeWordListener:
                 axis=0
             )
 
-            # ------------------------------------------------
             # Limita la durata massima.
-            # ------------------------------------------------
-
             max_samples = int(
                 (
                     PRE_ROLL_SECONDS
@@ -1543,16 +1560,85 @@ class WakeWordListener:
                     -max_samples:
                 ]
 
-            # ------------------------------------------------
-            # Salva SOLO il canale 0.
-            # ------------------------------------------------
-
+            # Teniamo SOLO il canale 0.
             mono = audio[:, 0]
 
             mono = np.asarray(
                 mono,
                 dtype=np.int16
             )
+
+            duration = (
+                len(mono)
+                / TARGET_SAMPLE_RATE
+            )
+
+        except Exception as e:
+
+            print(
+                f"[REC] Errore preparazione audio: {e}"
+            )
+
+            self.reset_to_listening()
+
+            return
+
+        command_direction = (
+            self.locked_direction
+            if self.locked_direction is not None
+            else -1.0
+        )
+
+        print()
+        print(
+            "================================================"
+        )
+        print(
+            "[COMMAND] Comando catturato"
+        )
+        print(
+            f"[COMMAND] Durata: {duration:.2f}s"
+        )
+        print(
+            f"[COMMAND] Direzione: "
+            f"{command_direction:.1f}°"
+        )
+        print(
+            "================================================"
+        )
+        print()
+
+        # ----------------------------------------------------
+        # INOLTRO A VOSK (funzionale, prioritario: non deve
+        # dipendere dal salvataggio WAV qui sotto)
+        # ----------------------------------------------------
+
+        if self.vosk_audio_queue is not None:
+
+            try:
+
+                self.vosk_audio_queue.put(
+                    (
+                        mono.tolist(),
+                        TARGET_SAMPLE_RATE
+                    )
+                )
+
+                print(
+                    "[COMMAND] Audio inoltrato a Vosk"
+                )
+
+            except Exception as e:
+
+                print(
+                    f"[COMMAND] Errore inoltro a Vosk: {e}"
+                )
+
+        # ----------------------------------------------------
+        # SALVATAGGIO WAV (solo debug/diagnostica, non critico)
+        # ----------------------------------------------------
+
+        try:
 
             with wave.open(
                 COMMAND_WAV,
@@ -1570,39 +1656,6 @@ class WakeWordListener:
                 wf.writeframes(
                     mono.tobytes()
                 )
-
-            duration = (
-                len(mono)
-                / TARGET_SAMPLE_RATE
-            )
-
-            print()
-            print(
-                "================================================"
-            )
-            print(
-                "[COMMAND] WAV pronto"
-            )
-            print(
-                f"[COMMAND] File: {COMMAND_WAV}"
-            )
-            print(
-                f"[COMMAND] Durata: {duration:.2f}s"
-            )
-            command_direction = (
-                self.locked_direction
-                if self.locked_direction is not None
-                else -1.0
-            )
-
-            print(
-                f"[COMMAND] Direzione: "
-                f"{command_direction:.1f}°"
-            )
-            print(
-                "================================================"
-            )
-            print()
 
         except Exception as e:
 
@@ -1746,7 +1799,10 @@ class WakeWordListener:
                     "[LISTENER] In ascolto..."
                 )
 
-                while True:
+                while (
+                    self.stop_event is None
+                    or not self.stop_event.is_set()
+                ):
 
                     try:
 
@@ -1918,6 +1974,16 @@ class WakeWordListener:
                                 "[LISTENER] "
                                 "Torno in ascolto..."
                             )
+
+                if (
+                    self.stop_event is not None
+                    and self.stop_event.is_set()
+                ):
+
+                    print(
+                        "[LISTENER] "
+                        "Stop richiesto, chiusura..."
+                    )
 
         except KeyboardInterrupt:
 

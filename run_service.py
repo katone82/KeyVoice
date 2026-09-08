@@ -7,7 +7,7 @@ import os
 import sys
 
 from vosk_listener import vosk_listener
-from openwakeword_listener import openwakeword_listener
+from xvf3800_wakeword_listener import WakeWordListener
 from fuzzy_parser import init_fuzzy, processa_comandi, command_queue, stop_event
 
 # ==============================
@@ -17,6 +17,13 @@ with open("config/config.json", "r", encoding="utf-8") as f:
     CONFIG = json.load(f)
 
 sys.profile = CONFIG['profile']
+
+# NOTA: la sezione CONFIG["openwakeword"] non è più usata. Il
+# nuovo motore XVF3800 (xvf3800_wakeword_listener.py) non legge
+# più la configurazione da config.json: usa le proprie costanti
+# di modulo (WAKEWORD, WAKE_THRESHOLD_HIGH/LOW, soglie di
+# direzione, ecc.) definite in cima al file. Se in futuro serve
+# renderle configurabili da config.json, vanno esposte lì.
 
 # ==============================
 # Coda audio e segnali di pronto
@@ -42,17 +49,23 @@ def vosk_thread():
         ready_event=vosk_ready_event
     )
 
-def openwakeword_thread():
+def wakeword_thread():
     print("[MAIN] Attesa Vosk pronta...")
     vosk_ready_event.wait()
     print(
-        "[MAIN] Avvio openWakeWord listener..."
+        "[MAIN] Avvio XVF3800 wake word listener..."
     )
-    openwakeword_listener(
-        audio_queue,
-        stop_event,
-        CONFIG["openwakeword"]
+    # Il nuovo motore gestisce da solo wake word + cattura del
+    # comando con filtro direzionale (accetta audio solo dalla
+    # direzione di provenienza della wake word), e inoltra
+    # l'audio catturato direttamente su audio_queue per Vosk,
+    # nello stesso formato (buffer, sample_rate) che usava il
+    # vecchio openwakeword_listener.py, ora dismesso.
+    listener = WakeWordListener(
+        vosk_audio_queue=audio_queue,
+        stop_event=stop_event
     )
+    listener.run()
 
 def invia_comando_ha(cmd, ha_url, ha_token):
     headers = {
@@ -90,7 +103,7 @@ def ha_command_consumer(ha_url, ha_token):
 # Avvio thread
 # ==============================
 t_vosk = threading.Thread(target=vosk_thread, daemon=True)
-t_wakeword = threading.Thread(target=openwakeword_thread,daemon=True)
+t_wakeword = threading.Thread(target=wakeword_thread, daemon=True)
 t_fuzzy = threading.Thread(target=processa_comandi, daemon=True)
 ha_url = CONFIG['homeassistant']['url'].rstrip('/') + '/api/services'
 ha_token = CONFIG['homeassistant']['token']
