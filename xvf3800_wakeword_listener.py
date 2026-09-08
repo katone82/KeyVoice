@@ -13,7 +13,7 @@ import numpy as np
 import sounddevice as sd
 from openwakeword.model import Model
 
-from debug_config import DEBUG_LOGGING
+import debug_config
 
 # ============================================================
 # CONFIGURAZIONE
@@ -70,7 +70,7 @@ WAKE_HOP_SAMPLES = WAKE_CHUNK_SAMPLES
 
 # Battito cardiaco: una riga leggera ogni tot secondi mentre si
 # è in ascolto, per confermare che il processo è vivo anche con
-# DEBUG_LOGGING spento (utile per distinguere "in ascolto in
+# debug_config.DEBUG_LOGGING spento (utile per distinguere "in ascolto in
 # silenzio" da "bloccato per davvero").
 ALIVE_LOG_INTERVAL = 15.0
 
@@ -242,6 +242,154 @@ if not os.path.isfile(BEEP_FILE):
         f"[BEEP] ATTENZIONE: file beep non trovato: "
         f"{BEEP_FILE} — il riscontro sonoro alla wake word "
         f"non verrà riprodotto finché il file non è presente."
+    )
+
+
+# ============================================================
+# CONFIG DA config.json (opzionale)
+# ============================================================
+
+def apply_config(cfg):
+    """
+    Sovrascrive le costanti di modulo con eventuali override
+    dalla sezione "openwakeword" di config.json. Ogni chiave
+    assente in cfg lascia invariato il default hardcoded qui
+    sopra. Va chiamata da run_service.py DOPO aver caricato
+    CONFIG e PRIMA di istanziare WakeWordListener — le funzioni
+    di questo modulo leggono queste costanti a runtime, quindi
+    vedono correttamente il valore aggiornato qui (sono nello
+    stesso modulo: a differenza di un "from modulo import nome"
+    fatto da un ALTRO file, qui non c'è alcun valore "congelato"
+    all'import).
+
+    Esempio in config.json:
+
+        "openwakeword": {
+            "model": "hey_jarvis",
+            "threshold_high": 0.45,
+            "threshold_low": 0.15,
+            "confirm_chunks": 3,
+            "pre_roll_seconds": 0.25,
+            "post_wake_ignore_seconds": 0.40,
+            "command_timeout_seconds": 4.0,
+            "max_command_seconds": 6.0,
+            "speech_start_ratio": 2.5,
+            "speech_end_ratio": 1.5,
+            "speech_end_time": 0.60,
+            "direction_angle_tolerance": 60.0,
+            "direction_lost_grace_seconds": 0.5,
+            "direction_min_dominance": 1.2,
+            "agc_max_gain": 8.0,
+            "agc_silence_floor": 15,
+            "wake_audio_channel": 0,
+            "beep_device": "plughw:3,0",
+            "beep_file": "./sounds/wake.wav",
+            "input_device_name": "reSpeaker XVF3800 4-Mic Array"
+        }
+    """
+
+    global WAKEWORD
+    global WAKE_THRESHOLD_HIGH, WAKE_THRESHOLD_LOW, WAKE_CONFIRM_CHUNKS
+    global PRE_ROLL_SECONDS, POST_WAKE_IGNORE_SECONDS
+    global COMMAND_TIMEOUT_SECONDS, MAX_COMMAND_SECONDS
+    global SPEECH_START_RATIO, SPEECH_END_RATIO, SPEECH_END_TIME
+    global DIRECTION_ANGLE_TOLERANCE, DIRECTION_LOST_GRACE_SECONDS
+    global DIRECTION_MIN_DOMINANCE
+    global WAKE_AGC_MAX_GAIN, WAKE_AGC_SILENCE_FLOOR
+    global WAKE_AUDIO_CHANNEL
+    global BEEP_DEVICE, BEEP_FILE
+    global INPUT_DEVICE_NAME
+
+    if not cfg:
+        return
+
+    WAKEWORD = cfg.get("model", WAKEWORD)
+
+    WAKE_THRESHOLD_HIGH = cfg.get(
+        "threshold_high", WAKE_THRESHOLD_HIGH
+    )
+    WAKE_THRESHOLD_LOW = cfg.get(
+        "threshold_low", WAKE_THRESHOLD_LOW
+    )
+    WAKE_CONFIRM_CHUNKS = cfg.get(
+        "confirm_chunks", WAKE_CONFIRM_CHUNKS
+    )
+
+    PRE_ROLL_SECONDS = cfg.get(
+        "pre_roll_seconds", PRE_ROLL_SECONDS
+    )
+    POST_WAKE_IGNORE_SECONDS = cfg.get(
+        "post_wake_ignore_seconds", POST_WAKE_IGNORE_SECONDS
+    )
+    COMMAND_TIMEOUT_SECONDS = cfg.get(
+        "command_timeout_seconds", COMMAND_TIMEOUT_SECONDS
+    )
+    MAX_COMMAND_SECONDS = cfg.get(
+        "max_command_seconds", MAX_COMMAND_SECONDS
+    )
+
+    SPEECH_START_RATIO = cfg.get(
+        "speech_start_ratio", SPEECH_START_RATIO
+    )
+    SPEECH_END_RATIO = cfg.get(
+        "speech_end_ratio", SPEECH_END_RATIO
+    )
+    SPEECH_END_TIME = cfg.get(
+        "speech_end_time", SPEECH_END_TIME
+    )
+
+    DIRECTION_ANGLE_TOLERANCE = cfg.get(
+        "direction_angle_tolerance", DIRECTION_ANGLE_TOLERANCE
+    )
+    DIRECTION_LOST_GRACE_SECONDS = cfg.get(
+        "direction_lost_grace_seconds",
+        DIRECTION_LOST_GRACE_SECONDS
+    )
+    DIRECTION_MIN_DOMINANCE = cfg.get(
+        "direction_min_dominance", DIRECTION_MIN_DOMINANCE
+    )
+
+    WAKE_AGC_MAX_GAIN = cfg.get(
+        "agc_max_gain", WAKE_AGC_MAX_GAIN
+    )
+    WAKE_AGC_SILENCE_FLOOR = cfg.get(
+        "agc_silence_floor", WAKE_AGC_SILENCE_FLOOR
+    )
+
+    WAKE_AUDIO_CHANNEL = cfg.get(
+        "wake_audio_channel", WAKE_AUDIO_CHANNEL
+    )
+
+    BEEP_DEVICE = cfg.get(
+        "beep_device", BEEP_DEVICE
+    )
+
+    beep_file_override = cfg.get("beep_file")
+
+    if beep_file_override:
+
+        # Stessa logica di risoluzione usata sopra: percorso
+        # relativo alla cartella dello script se non assoluto.
+        if os.path.isabs(beep_file_override):
+            BEEP_FILE = beep_file_override
+        else:
+            BEEP_FILE = os.path.abspath(
+                os.path.join(SCRIPT_DIR, beep_file_override)
+            )
+
+        if not os.path.isfile(BEEP_FILE):
+            print(
+                f"[BEEP] ATTENZIONE: file beep da config.json "
+                f"non trovato: {BEEP_FILE}"
+            )
+
+    INPUT_DEVICE_NAME = cfg.get(
+        "input_device_name", INPUT_DEVICE_NAME
+    )
+
+    print(
+        "[INIT] Configurazione da config.json applicata "
+        f"({len(cfg)} chiavi)"
     )
 
 
@@ -585,10 +733,10 @@ class XVF3800Telemetry:
                     )
 
                 # ------------------------------------------------
-                # DEBUG TELEMETRIA (solo se DEBUG_LOGGING attivo)
+                # DEBUG TELEMETRIA (solo se debug_config.DEBUG_LOGGING attivo)
                 # ------------------------------------------------
 
-                if DEBUG_LOGGING:
+                if debug_config.DEBUG_LOGGING:
 
                     now = time.monotonic()
 
@@ -974,7 +1122,7 @@ class WakeWordListener:
 
         # Battito cardiaco leggero (una riga ogni ALIVE_LOG_INTERVAL
         # secondi) per confermare che il processo è vivo anche con
-        # DEBUG_LOGGING spento, senza inondare la console.
+        # debug_config.DEBUG_LOGGING spento, senza inondare la console.
         self.last_alive_print = 0.0
 
     # ========================================================
@@ -1459,7 +1607,7 @@ class WakeWordListener:
         now = time.monotonic()
 
         if (
-            DEBUG_LOGGING
+            debug_config.DEBUG_LOGGING
             and now - self.last_wake_debug
             >= WAKE_DEBUG_INTERVAL
         ):
@@ -1683,10 +1831,10 @@ class WakeWordListener:
             self.last_speech_time = now
 
         # ----------------------------------------------------
-        # DEBUG (solo se DEBUG_LOGGING attivo)
+        # DEBUG (solo se debug_config.DEBUG_LOGGING attivo)
         # ----------------------------------------------------
 
-        if DEBUG_LOGGING:
+        if debug_config.DEBUG_LOGGING:
 
             data = self.xvf.snapshot()
 
@@ -1795,7 +1943,7 @@ class WakeWordListener:
 
                 trim_at = max(0, start - margin)
 
-                if trim_at > 0 and DEBUG_LOGGING:
+                if trim_at > 0 and debug_config.DEBUG_LOGGING:
 
                     print(
                         "[REC] Tagliato rumore iniziale: "
