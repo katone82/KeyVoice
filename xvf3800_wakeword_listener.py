@@ -1638,18 +1638,14 @@ class WakeWordListener:
         )
 
         # ----------------------------------------------------
-        # NIENTE PIÙ FILTRO DIREZIONALE DURANTE LA REGISTRAZIONE
+        # AUDIO REGISTRATO: SEMPRE TUTTO, NESSUN BUCO
         #
         # In ambienti riverberanti la direzione stimata può
-        # saltare di decine (anche >100) di gradi sulla STESSA
-        # voce per via degli echi, non solo quando parla
-        # qualcun altro. Zittire quei blocchi "fuori direzione"
+        # saltare di decine di gradi sulla STESSA voce per via
+        # degli echi. Zittire quei blocchi "fuori direzione"
         # tagliava pezzi veri di parlato a metà comando,
-        # producendo audio a buchi per Vosk. La direzione è
-        # già servita per decidere QUANDO iniziare a registrare
-        # (in process_wait_command); da qui in poi ci fidiamo e
-        # registriamo tutto, lasciando che sia il silenzio reale
-        # (via RMS) a chiudere il comando.
+        # producendo audio a buchi per Vosk. Registriamo quindi
+        # sempre il contenuto audio grezzo, senza filtrarlo.
         # ----------------------------------------------------
 
         filtered_audio = audio.copy()
@@ -1658,8 +1654,23 @@ class WakeWordListener:
             filtered_audio
         )
 
+        # ----------------------------------------------------
+        # FINE COMANDO: la direzione conta di nuovo
+        #
+        # Per decidere se il comando è ancora in corso (e quindi
+        # rimandare la chiusura) torniamo a richiedere che il
+        # suono provenga dalla direzione bloccata (con la
+        # consueta tolleranza/grazia). Senza questo, rumore o
+        # eco continui da ALTRE direzioni impedirebbero mai al
+        # rilevatore di silenzio di scattare, facendo durare
+        # ogni comando fino al tetto massimo (MAX_COMMAND_SECONDS)
+        # invece di chiudersi naturalmente sul vero silenzio
+        # della sorgente che ci interessa.
+        # ----------------------------------------------------
+
         speech_now = (
-            ratio >= SPEECH_END_RATIO
+            direction_active
+            and ratio >= SPEECH_END_RATIO
         )
 
         if speech_now:
@@ -1693,7 +1704,7 @@ class WakeWordListener:
             print(
                 f"[REC] RMS={rms:6.0f} "
                 f"ratio={ratio:4.2f} "
-                f"dir(info)={direction_status:3s} "
+                f"dir={direction_status:3s} "
                 f"DOM={direction:6.1f}° "
                 f"silence={silence_time:4.2f}s"
             )
