@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 
 import asyncio
+import json
 import logging
+import os
 import time
 import uuid
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Dict, Optional
+
+import paho.mqtt.client as mqtt
+import uvicorn
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-import uvicorn
 
 
 # ============================================================
@@ -18,6 +22,18 @@ import uvicorn
 
 HOST = "0.0.0.0"
 PORT = 8090
+
+# MQTT
+MQTT_HOST = os.getenv("MQTT_HOST", "127.0.0.1")
+MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
+MQTT_USERNAME = os.getenv("MQTT_USERNAME", "zigbee2mqtt")
+MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "doongle")
+
+MQTT_BASE_TOPIC = "keyvoice/timer"
+
+# ============================================================
+# LOGGING
+# ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,27 +53,32 @@ class Timer:
     name: Optional[str]
 
     duration: float
-
-    # Remaining time when paused.
     remaining: float
 
-    # Timestamp at which the current running period expires.
     end_time: Optional[float]
 
     status: str
 
     created_at: float
 
-    def to_dict(self):
-        remaining = self.remaining
+    def get_remaining(self) -> float:
 
         if self.status == "active" and self.end_time is not None:
-            remaining = max(0, self.end_time - time.monotonic())
+            return max(
+                0,
+                self.end_time - time.monotonic()
+            )
+
+        return max(0, self.remaining)
+
+    def to_dict(self):
+
+        remaining = self.get_remaining()
 
         return {
             "id": self.id,
             "name": self.name,
-            "duration": self.duration,
+            "duration": round(self.duration, 1),
             "remaining": round(remaining, 1),
             "remaining_seconds": int(remaining),
             "status": self.status,
@@ -79,14 +100,258 @@ class AddTimeRequest(BaseModel):
 
 
 # ============================================================
+# MQTT MANAGER
+# ============================================================
+
+class MQTTManager:
+
+    def __init__(self):
+
+        self.client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION2,
+            client_id="keyvoice-timer-service",
+        )
+
+        if MQTT_USERNAME:
+            self.client.username_pw_set(
+                MQTT_USERNAME,
+                MQTT_PASSWORD,
+            )
+
+        self.connected = False
+
+        self.client.on_connect = self._on_connect
+        self.client.on_disconnect = self._on_disconnect
+
+    # --------------------------------------------------------
+    # CONNECT
+    # --------------------------------------------------------
+
+    def connect(self):
+
+        logger.info(
+            "Connecting to MQTT %s:%s",
+            MQTT_HOST,
+            MQTT_PORT,
+        )
+
+        try:
+
+            self.client.connect(
+                MQTT_HOST,
+                MQTT_PORT,
+                keepalive=60,
+            )
+
+            self.client.loop_start()
+
+        except Exception:
+
+            logger.exception(
+                "Unable to connect to MQTT"
+            )
+
+    # --------------------------------------------------------
+    # CALLBACK
+    # --------------------------------------------------------
+
+    def _on_connect(
+        self,
+        client,
+        userdata,
+        flags,
+        reason_code,
+        properties=None,
+    ):
+
+        if reason_code == 0:
+
+            self.connected = True
+
+            logger.info(
+                "Connected to MQTT"
+            )
+
+        else:
+
+            logger.error(
+                "MQTT connection failed: %s",
+                reason_code,
+            )
+
+    # --------------------------------------------------------
+
+    def _on_disconnect(
+        self,
+        client,
+        userdata,
+        disconnect_flags,
+        reason_code,
+        properties=None,
+    ):
+
+        self.connected = False
+
+        logger.warning(
+            "Disconnected from MQTT"
+        )
+
+    # --------------------------------------------------------
+    # PUBLISH
+    # --------------------------------------------------------
+
+    def publish(
+        self,
+        topic: str,
+        payload,
+        retain: bool = False,
+    ):
+
+        if not self.connected:
+            return
+
+        if not isinstance(payload, str):
+
+            payload = json.dumps(
+                payload,
+                ensure_ascii=False,
+            )
+
+        self.client.publish(
+            topic,
+            payload,
+            qos=1,
+            retain=retain,
+        )
+
+    # --------------------------------------------------------
+    # DISCOVERY
+    # --------------------------------------------------------
+
+    def publish_discovery(
+        self,
+        timer: Timer,
+    ):
+
+        object_id = (
+            f"keyvoice_timer_{timer.id.replace('-', '_')}"
+        )
+
+        discovery_topic = (
+            f"homeassistant/sensor/{object_id}/config"
+        )
+
+        state_topic = (
+            f"{MQTT_BASE_TOPIC}/{timer.id}/state"
+        )
+
+        payload = {
+
+            "name": (
+                timer.name
+                if timer.name
+                else "KeyVoice Timer"
+            ),
+
+            "unique_id": object_id,
+
+            "state_topic": state_topic,
+
+            "value_template":
+                "{{ value_json.remaining_seconds }}",
+
+            "unit_of_measurement": "s",
+
+            "icon": "mdi:timer-outline",
+
+            "device": {
+                "identifiers": [
+                    "keyvoice_timer_service"
+                ],
+                "name": "KeyVoice Timer",
+                "manufacturer": "KeyVoice",
+                "model": "Timer Service",
+            },
+
+            "json_attributes_topic": state_topic,
+
+        }
+
+        self.publish(
+            discovery_topic,
+            payload,
+            retain=True,
+        )
+
+        logger.info(
+            "MQTT discovery published: %s",
+            timer.id,
+        )
+
+    # --------------------------------------------------------
+    # STATE
+    # --------------------------------------------------------
+
+    def publish_timer(
+        self,
+        timer: Timer,
+    ):
+
+        state_topic = (
+            f"{MQTT_BASE_TOPIC}/{timer.id}/state"
+        )
+
+        self.publish(
+            state_topic,
+            timer.to_dict(),
+            retain=True,
+        )
+
+    # --------------------------------------------------------
+    # EVENT
+    # --------------------------------------------------------
+
+    def publish_event(
+        self,
+        timer: Timer,
+        event: str,
+    ):
+
+        event_topic = (
+            f"{MQTT_BASE_TOPIC}/{timer.id}/event"
+        )
+
+        payload = {
+            "event": event,
+            "id": timer.id,
+            "name": timer.name,
+            "status": timer.status,
+            "timestamp": time.time(),
+        }
+
+        self.publish(
+            event_topic,
+            payload,
+            retain=False,
+        )
+
+
+# ============================================================
 # TIMER MANAGER
 # ============================================================
 
 class TimerManager:
 
-    def __init__(self):
+    def __init__(
+        self,
+        mqtt_manager: MQTTManager,
+    ):
+
         self.timers: Dict[str, Timer] = {}
+
         self.lock = asyncio.Lock()
+
+        self.mqtt = mqtt_manager
 
     # --------------------------------------------------------
     # CREATE
@@ -122,16 +387,30 @@ class TimerManager:
             duration,
         )
 
+        self.mqtt.publish_discovery(timer)
+        self.mqtt.publish_timer(timer)
+
+        self.mqtt.publish_event(
+            timer,
+            "started",
+        )
+
         return timer
 
     # --------------------------------------------------------
     # GET
     # --------------------------------------------------------
 
-    async def get(self, timer_id: str) -> Timer:
+    async def get(
+        self,
+        timer_id: str,
+    ) -> Timer:
 
         async with self.lock:
-            timer = self.timers.get(timer_id)
+
+            timer = self.timers.get(
+                timer_id
+            )
 
         if timer is None:
             raise KeyError(timer_id)
@@ -151,22 +430,33 @@ class TimerManager:
     # PAUSE
     # --------------------------------------------------------
 
-    async def pause(self, timer_id: str) -> Timer:
+    async def pause(
+        self,
+        timer_id: str,
+    ) -> Timer:
 
         timer = await self.get(timer_id)
 
         if timer.status != "active":
             return timer
 
-        timer.remaining = max(
-            0,
-            timer.end_time - time.monotonic()
-        )
+        timer.remaining = timer.get_remaining()
 
         timer.end_time = None
+
         timer.status = "paused"
 
-        logger.info("Timer paused: %s", timer_id)
+        logger.info(
+            "Timer paused: %s",
+            timer_id,
+        )
+
+        self.mqtt.publish_timer(timer)
+
+        self.mqtt.publish_event(
+            timer,
+            "paused",
+        )
 
         return timer
 
@@ -174,7 +464,10 @@ class TimerManager:
     # RESUME
     # --------------------------------------------------------
 
-    async def resume(self, timer_id: str) -> Timer:
+    async def resume(
+        self,
+        timer_id: str,
+    ) -> Timer:
 
         timer = await self.get(timer_id)
 
@@ -182,12 +475,23 @@ class TimerManager:
             return timer
 
         timer.end_time = (
-            time.monotonic() + timer.remaining
+            time.monotonic()
+            + timer.remaining
         )
 
         timer.status = "active"
 
-        logger.info("Timer resumed: %s", timer_id)
+        logger.info(
+            "Timer resumed: %s",
+            timer_id,
+        )
+
+        self.mqtt.publish_timer(timer)
+
+        self.mqtt.publish_event(
+            timer,
+            "resumed",
+        )
 
         return timer
 
@@ -195,15 +499,28 @@ class TimerManager:
     # CANCEL
     # --------------------------------------------------------
 
-    async def cancel(self, timer_id: str) -> Timer:
+    async def cancel(
+        self,
+        timer_id: str,
+    ) -> Timer:
 
         timer = await self.get(timer_id)
 
-        timer.end_time = None
         timer.remaining = 0
+        timer.end_time = None
         timer.status = "cancelled"
 
-        logger.info("Timer cancelled: %s", timer_id)
+        logger.info(
+            "Timer cancelled: %s",
+            timer_id,
+        )
+
+        self.mqtt.publish_timer(timer)
+
+        self.mqtt.publish_event(
+            timer,
+            "cancelled",
+        )
 
         return timer
 
@@ -228,6 +545,7 @@ class TimerManager:
             timer.remaining += seconds
 
         else:
+
             raise ValueError(
                 "Cannot add time to a finished or cancelled timer"
             )
@@ -240,13 +558,23 @@ class TimerManager:
             timer_id,
         )
 
+        self.mqtt.publish_timer(timer)
+
+        self.mqtt.publish_event(
+            timer,
+            "time_added",
+        )
+
         return timer
 
     # --------------------------------------------------------
     # FINISH
     # --------------------------------------------------------
 
-    async def finish(self, timer: Timer):
+    async def finish(
+        self,
+        timer: Timer,
+    ):
 
         timer.remaining = 0
         timer.end_time = None
@@ -258,23 +586,24 @@ class TimerManager:
             timer.name,
         )
 
-        # ----------------------------------------------------
-        # FUTURE:
-        #
-        # publish MQTT event
-        #
-        # timer/finished
-        #
-        # or notify Home Assistant
-        # ----------------------------------------------------
+        self.mqtt.publish_timer(timer)
+
+        self.mqtt.publish_event(
+            timer,
+            "finished",
+        )
 
     # --------------------------------------------------------
-    # BACKGROUND LOOP
+    # MONITOR
     # --------------------------------------------------------
 
     async def monitor(self):
 
-        logger.info("Timer monitor started")
+        logger.info(
+            "Timer monitor started"
+        )
+
+        last_publish = {}
 
         while True:
 
@@ -289,16 +618,59 @@ class TimerManager:
                     if (
                         timer.status == "active"
                         and timer.end_time is not None
-                        and now >= timer.end_time
                     ):
-                        await self.finish(timer)
+
+                        remaining = timer.get_remaining()
+
+                        # Publish countdown every second.
+                        current_second = int(
+                            remaining
+                        )
+
+                        previous_second = (
+                            last_publish.get(
+                                timer.id
+                            )
+                        )
+
+                        if (
+                            previous_second
+                            != current_second
+                        ):
+
+                            last_publish[
+                                timer.id
+                            ] = current_second
+
+                            self.mqtt.publish_timer(
+                                timer
+                            )
+
+                        # Timer finished.
+                        if now >= timer.end_time:
+
+                            await self.finish(
+                                timer
+                            )
 
             except Exception:
+
                 logger.exception(
                     "Error in timer monitor"
                 )
 
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.1)
+
+
+# ============================================================
+# MQTT
+# ============================================================
+
+mqtt_manager = MQTTManager()
+
+timer_manager = TimerManager(
+    mqtt_manager
+)
 
 
 # ============================================================
@@ -307,10 +679,8 @@ class TimerManager:
 
 app = FastAPI(
     title="KeyVoice Timer Service",
-    version="1.0.0",
+    version="1.1.0",
 )
-
-manager = TimerManager()
 
 
 # ============================================================
@@ -320,8 +690,10 @@ manager = TimerManager()
 @app.on_event("startup")
 async def startup():
 
+    mqtt_manager.connect()
+
     asyncio.create_task(
-        manager.monitor()
+        timer_manager.monitor()
     )
 
     logger.info(
@@ -330,7 +702,7 @@ async def startup():
 
 
 # ============================================================
-# API
+# HEALTH
 # ============================================================
 
 @app.get("/health")
@@ -339,19 +711,20 @@ async def health():
     return {
         "status": "ok",
         "service": "keyvoice-timer",
+        "mqtt_connected": mqtt_manager.connected,
     }
 
 
-# ------------------------------------------------------------
-# CREATE TIMER
-# ------------------------------------------------------------
+# ============================================================
+# CREATE
+# ============================================================
 
 @app.post("/timers")
 async def create_timer(
     request: CreateTimerRequest,
 ):
 
-    timer = await manager.create(
+    timer = await timer_manager.create(
         duration=request.duration,
         name=request.name,
     )
@@ -359,14 +732,14 @@ async def create_timer(
     return timer.to_dict()
 
 
-# ------------------------------------------------------------
-# LIST TIMERS
-# ------------------------------------------------------------
+# ============================================================
+# LIST
+# ============================================================
 
 @app.get("/timers")
 async def list_timers():
 
-    timers = await manager.list()
+    timers = await timer_manager.list()
 
     return [
         timer.to_dict()
@@ -374,9 +747,9 @@ async def list_timers():
     ]
 
 
-# ------------------------------------------------------------
-# GET TIMER
-# ------------------------------------------------------------
+# ============================================================
+# GET
+# ============================================================
 
 @app.get("/timers/{timer_id}")
 async def get_timer(
@@ -385,7 +758,7 @@ async def get_timer(
 
     try:
 
-        timer = await manager.get(
+        timer = await timer_manager.get(
             timer_id
         )
 
@@ -399,9 +772,9 @@ async def get_timer(
         )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # PAUSE
-# ------------------------------------------------------------
+# ============================================================
 
 @app.post("/timers/{timer_id}/pause")
 async def pause_timer(
@@ -410,7 +783,7 @@ async def pause_timer(
 
     try:
 
-        timer = await manager.pause(
+        timer = await timer_manager.pause(
             timer_id
         )
 
@@ -424,9 +797,9 @@ async def pause_timer(
         )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # RESUME
-# ------------------------------------------------------------
+# ============================================================
 
 @app.post("/timers/{timer_id}/resume")
 async def resume_timer(
@@ -435,7 +808,7 @@ async def resume_timer(
 
     try:
 
-        timer = await manager.resume(
+        timer = await timer_manager.resume(
             timer_id
         )
 
@@ -449,9 +822,9 @@ async def resume_timer(
         )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # CANCEL
-# ------------------------------------------------------------
+# ============================================================
 
 @app.post("/timers/{timer_id}/cancel")
 async def cancel_timer(
@@ -460,7 +833,7 @@ async def cancel_timer(
 
     try:
 
-        timer = await manager.cancel(
+        timer = await timer_manager.cancel(
             timer_id
         )
 
@@ -474,9 +847,9 @@ async def cancel_timer(
         )
 
 
-# ------------------------------------------------------------
+# ============================================================
 # ADD TIME
-# ------------------------------------------------------------
+# ============================================================
 
 @app.post("/timers/{timer_id}/add")
 async def add_time(
@@ -486,7 +859,7 @@ async def add_time(
 
     try:
 
-        timer = await manager.add_time(
+        timer = await timer_manager.add_time(
             timer_id,
             request.seconds,
         )
