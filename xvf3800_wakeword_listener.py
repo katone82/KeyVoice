@@ -13,18 +13,11 @@ import numpy as np
 import sounddevice as sd
 from openwakeword.model import Model
 
+from debug_config import DEBUG_LOGGING
 
 # ============================================================
 # CONFIGURAZIONE
 # ============================================================
-
-# Log dettagliati (telemetria XVF ad ogni poll, score wake word
-# periodico, riga RMS/direzione ad ogni blocco durante la
-# registrazione). Lascia False per vedere solo i punti cardine
-# della pipeline (wake, direzione, inizio/fine comando, salvataggio
-# WAV). Metti a True solo quando serve ritarare soglie o
-# diagnosticare un problema.
-DEBUG_LOGGING = False
 
 TARGET_SAMPLE_RATE = 16000
 DEVICE_SAMPLE_RATE = 16000
@@ -124,10 +117,14 @@ MAX_COMMAND_SECONDS = 6.0
 # Con la direzione bloccata dalla wake word e la conferma
 # vocale quasi istantanea (SPEECH_START_TIME), non serve piu'
 # un pre-roll lungo per compensare il ritardo di conferma.
-# Lo teniamo comunque a mezzo secondo come cuscinetto per
-# l'attacco morbido della voce (il volume sale gradualmente
-# prima di superare SPEECH_START_RATIO).
-PRE_ROLL_SECONDS = 0.50
+# Ridotto da 0.5 a 0.25s: un pre-roll piu' corto riduce le
+# occasioni di catturare rumore ambientale (TV, click, coda del
+# beep) prima della voce vera, che Vosk — grammatica chiusa,
+# nessun "cestino" per il rumore — è costretto a interpretare
+# come una parola nota, anteponendola al comando reale (es.
+# "alarm accendi luce tavolo"). trim_leading_noise() fa comunque
+# da rete di sicurezza per l'attacco morbido della voce.
+PRE_ROLL_SECONDS = 0.25
 
 # ------------------------------------------------------------
 # XVF3800
@@ -861,7 +858,8 @@ class WakeWordListener:
     def __init__(
         self,
         vosk_audio_queue=None,
-        stop_event=None
+        stop_event=None,
+        ready_event=None
     ):
 
         # Coda esterna verso cui inoltrare l'audio del comando
@@ -875,6 +873,13 @@ class WakeWordListener:
         # modalità standalone: in quel caso resta l'unico modo per
         # uscire Ctrl+C (KeyboardInterrupt), gestito in run().
         self.stop_event = stop_event
+
+        # threading.Event impostato quando il listener è
+        # davvero operativo (device aperto, calibrazione rumore
+        # completata), non solo quando il thread è partito.
+        # run_service.py lo usa per stampare "pronto" solo a
+        # inizializzazione conclusa.
+        self.ready_event = ready_event
 
         print(
             f"[INIT] XVF host: "
@@ -1746,6 +1751,63 @@ class WakeWordListener:
     # SAVE WAV
     # ========================================================
 
+    def trim_leading_noise(self, mono):
+        """
+        Rimuove l'eventuale rumore/silenzio iniziale dal buffer
+        assemblato (pre-roll + comando) prima di inviarlo a
+        Vosk. Il pre-roll esiste per non perdere l'attacco della
+        voce, ma può contenere un breve rumore ambientale (TV,
+        click, coda del beep): la grammatica chiusa di Vosk non
+        ha un "cestino" per il rumore ed è costretta a
+        interpretarlo come la parola nota più vicina, anteponendola
+        al comando vero (es. "alarm accendi luce tavolo" invece
+        di "accendi luce tavolo").
+
+        Scorre il buffer a blocchi di ~30ms e trova il primo
+        blocco con energia sopra la soglia usata per il rilevamento
+        voce dal vivo (stesso criterio di SPEECH_START_RATIO),
+        poi taglia da lì con un piccolo margine di sicurezza.
+        """
+
+        block = int(0.03 * TARGET_SAMPLE_RATE)
+
+        if len(mono) <= block:
+            return mono
+
+        margin = int(0.10 * TARGET_SAMPLE_RATE)
+
+        threshold = (
+            self.speech_gate.noise_floor
+            * SPEECH_START_RATIO
+        )
+
+        mono_f = mono.astype(np.float32)
+
+        for start in range(0, len(mono) - block, block):
+
+            chunk = mono_f[start:start + block]
+
+            rms = float(
+                np.sqrt(np.mean(chunk * chunk))
+            )
+
+            if rms >= threshold:
+
+                trim_at = max(0, start - margin)
+
+                if trim_at > 0 and DEBUG_LOGGING:
+
+                    print(
+                        "[REC] Tagliato rumore iniziale: "
+                        f"{trim_at / TARGET_SAMPLE_RATE:.2f}s"
+                    )
+
+                return mono[trim_at:]
+
+        # Nessun blocco energico trovato: lascia il buffer
+        # invariato, meglio non rischiare di tagliare voce vera.
+        return mono
+
     def finish_command(self):
 
         if not self.command_audio:
@@ -1791,6 +1853,10 @@ class WakeWordListener:
             mono = np.asarray(
                 mono,
                 dtype=np.int16
+            )
+
+            mono = self.trim_leading_noise(
+                mono
             )
 
             duration = (
@@ -2019,6 +2085,9 @@ class WakeWordListener:
                 print()
 
                 self.calibrate_noise()
+
+                if self.ready_event is not None:
+                    self.ready_event.set()
 
                 print(
                     "[LISTENER] In ascolto..."
