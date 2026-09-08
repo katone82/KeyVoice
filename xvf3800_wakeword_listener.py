@@ -24,7 +24,7 @@ from openwakeword.model import Model
 # della pipeline (wake, direzione, inizio/fine comando, salvataggio
 # WAV). Metti a True solo quando serve ritarare soglie o
 # diagnosticare un problema.
-DEBUG_LOGGING = True
+DEBUG_LOGGING = False
 
 TARGET_SAMPLE_RATE = 16000
 DEVICE_SAMPLE_RATE = 16000
@@ -1638,35 +1638,31 @@ class WakeWordListener:
         )
 
         # ----------------------------------------------------
-        # FILTRO DIREZIONALE
+        # NIENTE PIÙ FILTRO DIREZIONALE DURANTE LA REGISTRAZIONE
         #
-        # Se la direzione è quella della voce:
-        # manteniamo il campione.
-        #
-        # Se la direzione cambia:
-        # sostituiamo il campione con silenzio.
+        # In ambienti riverberanti la direzione stimata può
+        # saltare di decine (anche >100) di gradi sulla STESSA
+        # voce per via degli echi, non solo quando parla
+        # qualcun altro. Zittire quei blocchi "fuori direzione"
+        # tagliava pezzi veri di parlato a metà comando,
+        # producendo audio a buchi per Vosk. La direzione è
+        # già servita per decidere QUANDO iniziare a registrare
+        # (in process_wait_command); da qui in poi ci fidiamo e
+        # registriamo tutto, lasciando che sia il silenzio reale
+        # (via RMS) a chiudere il comando.
         # ----------------------------------------------------
 
-        if direction_active:
-
-            filtered_audio = audio.copy()
-
-        else:
-
-            filtered_audio = np.zeros_like(
-                audio
-            )
+        filtered_audio = audio.copy()
 
         self.command_audio.append(
             filtered_audio
         )
 
-        directional_speech = (
-            direction_active
-            and ratio >= SPEECH_END_RATIO
+        speech_now = (
+            ratio >= SPEECH_END_RATIO
         )
 
-        if directional_speech:
+        if speech_now:
 
             self.last_speech_time = now
 
@@ -1697,7 +1693,7 @@ class WakeWordListener:
             print(
                 f"[REC] RMS={rms:6.0f} "
                 f"ratio={ratio:4.2f} "
-                f"dir={direction_status:3s} "
+                f"dir(info)={direction_status:3s} "
                 f"DOM={direction:6.1f}° "
                 f"silence={silence_time:4.2f}s"
             )
