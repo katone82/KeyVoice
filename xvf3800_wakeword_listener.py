@@ -7,6 +7,7 @@ import subprocess
 import collections
 import wave
 import math
+import re
 
 import numpy as np
 import sounddevice as sd
@@ -29,6 +30,14 @@ TARGET_SAMPLE_RATE = 16000
 DEVICE_SAMPLE_RATE = 16000
 CHANNELS = 2
 
+# Canale usato SOLO per la wake word (RMS/direzione continuano a
+# usare il canale 0). Se il canale 1 del reSpeaker porta un
+# segnale processato diversamente (es. output con AEC/NS attivi
+# invece del raw), può dare uno score più alto a distanza. Prova
+# a metterlo a 1 e confronta gli score in [WAKE-DEBUG] a parità
+# di distanza/voce.
+WAKE_AUDIO_CHANNEL = 0
+
 WAKEWORD = "hey_jarvis"
 
 # ------------------------------------------------------------
@@ -42,8 +51,8 @@ WAKEWORD = "hey_jarvis"
 # falsi positivi su rumore.
 # Ritara osservando i valori reali negli score [WAKE-DEBUG].
 WAKE_THRESHOLD_HIGH = 0.45
-WAKE_THRESHOLD_LOW = 0.20
-WAKE_CONFIRM_CHUNKS = 2
+WAKE_THRESHOLD_LOW = 0.15
+WAKE_CONFIRM_CHUNKS = 3
 
 # openWakeWord è progettato per ricevere audio in blocchi da
 # esattamente 80ms (1280 campioni a 16kHz): è la dimensione con
@@ -256,8 +265,20 @@ def angle_distance(a, b):
 # ------------------------------------------------------------
 
 WAKE_AGC_TARGET_PEAK = 0.5
-WAKE_AGC_MAX_GAIN = 4.0
-WAKE_AGC_SILENCE_FLOOR = 50
+
+# Guadagno massimo applicabile. Più alto = più portata per il
+# parlato debole/distante, ma amplifica di più anche il rumore
+# di fondo genuino (rischio di più falsi positivi in ambienti
+# rumorosi). Ritara guardando gli score in [WAKE-DEBUG].
+WAKE_AGC_MAX_GAIN = 8.0
+
+# Sotto questo picco consideriamo il chunk "silenzio" e non lo
+# amplifichiamo (eviterebbe solo di alzare rumore/hiss). ATTENZIONE:
+# un valore troppo alto qui tratta come "silenzio" anche parlato
+# reale ma debole (voce da 2+ metri può avere picchi ben sotto 50
+# su scala int16), azzerando il beneficio dell'AGC proprio quando
+# servirebbe di più. Tenerlo basso.
+WAKE_AGC_SILENCE_FLOOR = 15
 
 
 def normalize_wake_gain(chunk):
@@ -869,6 +890,8 @@ class WakeWordListener:
             f"{self.device_index}"
         )
 
+        self.print_alsa_capture_diagnostics()
+
         self.audio_queue = queue.Queue(
             maxsize=100
         )
@@ -949,10 +972,170 @@ class WakeWordListener:
                     f"{index}: {name}"
                 )
 
+                # Il nome riportato da sounddevice per i device
+                # ALSA include tipicamente "(hw:X,Y)": lo
+                # estraiamo per poter interrogare amixer sulla
+                # scheda giusta senza doverlo indovinare/
+                # hardcodare (varia da macchina a macchina).
+                match = re.search(
+                    r"hw:(\d+),\d+",
+                    name
+                )
+
+                self.alsa_card = (
+                    match.group(1)
+                    if match
+                    else None
+                )
+
                 return index
 
         raise RuntimeError(
             "Dispositivo XVF3800 non trovato"
+        )
+
+    # ========================================================
+    # DIAGNOSTICA ALSA
+    # ========================================================
+
+    def print_alsa_capture_diagnostics(self):
+        """
+        Stampa i controlli ALSA (amixer) della scheda del
+        microfono, così è subito visibile se c'è guadagno di
+        cattura non sfruttato senza dover aprire un altro
+        terminale. Solo diagnostica: non modifica nulla.
+        """
+
+        if self.alsa_card is None:
+
+            print(
+                "[AUDIO] Impossibile determinare la scheda "
+                "ALSA dal nome del device, salto la "
+                "diagnostica amixer."
+            )
+
+            return
+
+        try:
+
+            result = subprocess.run(
+                [
+                    "amixer",
+                    "-c",
+                    self.alsa_card,
+                    "controls"
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5.0
+            )
+
+            if result.returncode != 0:
+
+                print(
+                    "[AUDIO] amixer non disponibile o "
+                    f"errore (scheda {self.alsa_card}): "
+                    f"{result.stderr.strip()}"
+                )
+
+                return
+
+            righe_capture = [
+                riga
+                for riga in result.stdout.splitlines()
+                if "Capture" in riga
+                or "Mic" in riga
+                or "Gain" in riga
+            ]
+
+            if not righe_capture:
+
+                print(
+                    "[AUDIO] Nessun controllo di cattura/gain "
+                    f"trovato su scheda {self.alsa_card} "
+                    "(potrebbe non essere regolabile via "
+                    "ALSA su questo dispositivo)."
+                )
+
+                return
+
+            print(
+                f"[AUDIO] Controlli di cattura su scheda "
+                f"{self.alsa_card}:"
+            )
+
+            for riga in righe_capture:
+
+                print(f"[AUDIO]   {riga.strip()}")
+
+                # Per ogni controllo mostriamo anche il valore
+                # attuale, così si vede subito se c'è margine.
+                nome_controllo = self._estrai_nome_controllo(
+                    riga
+                )
+
+                if nome_controllo is None:
+                    continue
+
+                contenuto = subprocess.run(
+                    [
+                        "amixer",
+                        "-c",
+                        self.alsa_card,
+                        "sget",
+                        nome_controllo
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5.0
+                )
+
+                if contenuto.returncode == 0:
+
+                    for riga_valore in (
+                        contenuto.stdout.splitlines()
+                    ):
+
+                        if (
+                            "Playback" in riga_valore
+                            or "Capture" in riga_valore
+                        ) and (
+                            "[" in riga_valore
+                        ):
+
+                            print(
+                                f"[AUDIO]     {riga_valore.strip()}"
+                            )
+
+            print(
+                "[AUDIO] Per alzare un controllo: "
+                f"amixer -c {self.alsa_card} sset "
+                "'<nome controllo>' 100%"
+            )
+
+        except Exception as e:
+
+            print(
+                f"[AUDIO] Errore diagnostica amixer: {e}"
+            )
+
+    @staticmethod
+    def _estrai_nome_controllo(riga_amixer):
+        """
+        Da una riga tipo "numid=5,iface=MIXER,name='Mic Capture
+        Volume'" estrae il nome tra apici singoli, da passare a
+        `amixer sget`.
+        """
+
+        match = re.search(
+            r"name='([^']+)'",
+            riga_amixer
+        )
+
+        return (
+            match.group(1)
+            if match
+            else None
         )
 
     # ========================================================
@@ -1176,7 +1359,7 @@ class WakeWordListener:
 
     def check_wakeword(self, audio):
 
-        mono = audio[:, 0]
+        mono = audio[:, WAKE_AUDIO_CHANNEL]
 
         # Accumuliamo i campioni ricevuti (blocchi da 30ms) e li
         # passiamo al modello solo in chunk da esattamente
