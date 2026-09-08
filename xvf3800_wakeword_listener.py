@@ -297,10 +297,10 @@ def normalize_wake_gain(chunk):
 
     chunk_f = chunk.astype(np.float32)
 
-    peak = np.max(np.abs(chunk_f))
+    peak = float(np.max(np.abs(chunk_f)))
 
     if peak < WAKE_AGC_SILENCE_FLOOR:
-        return chunk
+        return chunk, peak, 1.0
 
     target = 32767.0 * WAKE_AGC_TARGET_PEAK
 
@@ -310,7 +310,7 @@ def normalize_wake_gain(chunk):
     )
 
     if gain <= 1.0:
-        return chunk
+        return chunk, peak, 1.0
 
     boosted = np.clip(
         chunk_f * gain,
@@ -318,7 +318,7 @@ def normalize_wake_gain(chunk):
         32767
     )
 
-    return boosted.astype(np.int16)
+    return boosted.astype(np.int16), peak, gain
 
 
 # ============================================================
@@ -948,6 +948,13 @@ class WakeWordListener:
         # processato), usato per il debug periodico.
         self.last_wake_score = 0.0
 
+        # Picco raw (pre-AGC) e guadagno applicato dall'ultimo
+        # chunk processato, usati per il debug periodico: dicono
+        # se il segnale in ingresso è debole e se l'AGC sta
+        # davvero intervenendo.
+        self.last_wake_peak = 0.0
+        self.last_wake_gain = 1.0
+
         # Battito cardiaco leggero (una riga ogni ALIVE_LOG_INTERVAL
         # secondi) per confermare che il processo è vivo anche con
         # DEBUG_LOGGING spento, senza inondare la console.
@@ -1004,6 +1011,12 @@ class WakeWordListener:
         microfono, così è subito visibile se c'è guadagno di
         cattura non sfruttato senza dover aprire un altro
         terminale. Solo diagnostica: non modifica nulla.
+
+        Usa `amixer contents` (interfaccia "raw", stessa di
+        `controls`) invece di `amixer sget` (interfaccia
+        "simple", nomi spesso diversi da quelli elencati da
+        `controls` — su questo device causava query silenziose
+        e senza errore visibile).
         """
 
         if self.alsa_card is None:
@@ -1023,7 +1036,7 @@ class WakeWordListener:
                     "amixer",
                     "-c",
                     self.alsa_card,
-                    "controls"
+                    "contents"
                 ],
                 capture_output=True,
                 text=True,
@@ -1040,15 +1053,43 @@ class WakeWordListener:
 
                 return
 
-            righe_capture = [
-                riga
-                for riga in result.stdout.splitlines()
-                if "Capture" in riga
-                or "Mic" in riga
-                or "Gain" in riga
+            # `amixer contents` stampa un blocco per ogni
+            # controllo, a partire da una riga "numid=...".
+            # Spezziamo l'output in blocchi e teniamo solo
+            # quelli il cui header contiene parole chiave utili.
+            blocchi = []
+            blocco_corrente = []
+
+            for riga in result.stdout.splitlines():
+
+                if riga.startswith("numid="):
+
+                    if blocco_corrente:
+                        blocchi.append(blocco_corrente)
+
+                    blocco_corrente = [riga]
+
+                else:
+
+                    blocco_corrente.append(riga)
+
+            if blocco_corrente:
+                blocchi.append(blocco_corrente)
+
+            blocchi_utili = [
+                blocco
+                for blocco in blocchi
+                if any(
+                    parola in blocco[0]
+                    for parola in (
+                        "Capture",
+                        "Mic",
+                        "Gain"
+                    )
+                )
             ]
 
-            if not righe_capture:
+            if not blocchi_utili:
 
                 print(
                     "[AUDIO] Nessun controllo di cattura/gain "
@@ -1064,54 +1105,23 @@ class WakeWordListener:
                 f"{self.alsa_card}:"
             )
 
-            for riga in righe_capture:
+            for blocco in blocchi_utili:
 
-                print(f"[AUDIO]   {riga.strip()}")
+                for riga in blocco:
 
-                # Per ogni controllo mostriamo anche il valore
-                # attuale, così si vede subito se c'è margine.
+                    print(f"[AUDIO]   {riga.strip()}")
+
                 nome_controllo = self._estrai_nome_controllo(
-                    riga
+                    blocco[0]
                 )
 
-                if nome_controllo is None:
-                    continue
+                if nome_controllo:
 
-                contenuto = subprocess.run(
-                    [
-                        "amixer",
-                        "-c",
-                        self.alsa_card,
-                        "sget",
-                        nome_controllo
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=5.0
-                )
-
-                if contenuto.returncode == 0:
-
-                    for riga_valore in (
-                        contenuto.stdout.splitlines()
-                    ):
-
-                        if (
-                            "Playback" in riga_valore
-                            or "Capture" in riga_valore
-                        ) and (
-                            "[" in riga_valore
-                        ):
-
-                            print(
-                                f"[AUDIO]     {riga_valore.strip()}"
-                            )
-
-            print(
-                "[AUDIO] Per alzare un controllo: "
-                f"amixer -c {self.alsa_card} sset "
-                "'<nome controllo>' 100%"
-            )
+                    print(
+                        "[AUDIO]   -> per alzare: "
+                        f"amixer -c {self.alsa_card} sset "
+                        f"'{nome_controllo}' 100%"
+                    )
 
         except Exception as e:
 
@@ -1123,8 +1133,7 @@ class WakeWordListener:
     def _estrai_nome_controllo(riga_amixer):
         """
         Da una riga tipo "numid=5,iface=MIXER,name='Mic Capture
-        Volume'" estrae il nome tra apici singoli, da passare a
-        `amixer sget`.
+        Volume'" estrae il nome tra apici singoli.
         """
 
         match = re.search(
@@ -1382,9 +1391,12 @@ class WakeWordListener:
                 self.wake_buffer[WAKE_HOP_SAMPLES:]
             )
 
-            chunk = normalize_wake_gain(
+            chunk, peak, gain_applicato = normalize_wake_gain(
                 chunk
             )
+
+            self.last_wake_peak = peak
+            self.last_wake_gain = gain_applicato
 
             prediction = self.model.predict(
                 chunk
@@ -1440,7 +1452,9 @@ class WakeWordListener:
             print(
                 f"[WAKE-DEBUG] score={self.last_wake_score:.3f} "
                 f"high={WAKE_THRESHOLD_HIGH} "
-                f"low={WAKE_THRESHOLD_LOW}"
+                f"low={WAKE_THRESHOLD_LOW} "
+                f"peak={self.last_wake_peak:.0f} "
+                f"gain={self.last_wake_gain:.2f}x"
             )
 
         return wake_detected, best_score
