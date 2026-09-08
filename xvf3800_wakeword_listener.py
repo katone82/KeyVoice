@@ -56,17 +56,15 @@ WAKE_CONFIRM_CHUNKS = 2
 # costringono a ripetere la wake word più volte).
 WAKE_CHUNK_SAMPLES = 1280
 
-# Overlap tra chunk successivi: invece di tagliare l'audio in
-# blocchi consecutivi non sovrapposti (hop = WAKE_CHUNK_SAMPLES,
-# comportamento precedente), avanziamo di un hop più piccolo.
-# Così, se la parola cade a cavallo del confine tra due chunk,
-# esiste comunque una finestra successiva che la contiene per
-# intero e allineata: il modello ha più occasioni di riconoscerla.
-# Onere in più: circa 2x le chiamate a model.predict() (ancora
-# trascurabile per un modello di wake word così piccolo). Per
-# tornare al comportamento senza overlap, imposta
-# WAKE_HOP_SAMPLES = WAKE_CHUNK_SAMPLES.
-WAKE_HOP_SAMPLES = 640
+# NOTA: openWakeWord mantiene un proprio buffer streaming
+# interno tra una chiamata a predict() e l'altra (calcola le
+# feature audio in modo incrementale sulla sequenza che gli
+# viene passata). Alimentarlo con finestre sovrapposte (overlap
+# manuale) reinserisce gli stessi campioni due volte nel suo
+# stream interno, disallineando la sua timeline e azzerando lo
+# score. Il chunk successivo deve quindi partire esattamente
+# dove finisce il precedente: nessun overlap, hop = chunk size.
+WAKE_HOP_SAMPLES = WAKE_CHUNK_SAMPLES
 
 # Battito cardiaco: una riga leggera ogni tot secondi mentre si
 # è in ascolto, per confermare che il processo è vivo anche con
@@ -1164,13 +1162,12 @@ class WakeWordListener:
 
         mono = audio[:, 0]
 
-        # Accumuliamo i campioni ricevuti (blocchi da 30ms) in un
-        # buffer scorrevole e ne estraiamo finestre da esattamente
-        # WAKE_CHUNK_SAMPLES (80ms, l'allineamento con cui
-        # openWakeWord lavora internamente), facendole avanzare di
-        # WAKE_HOP_SAMPLES invece di consumare l'intero chunk: così
-        # le finestre si sovrappongono e la parola ha più occasioni
-        # di cadere allineata per intero in almeno una di esse.
+        # Accumuliamo i campioni ricevuti (blocchi da 30ms) e li
+        # passiamo al modello solo in chunk da esattamente
+        # WAKE_CHUNK_SAMPLES (80ms), la dimensione con cui
+        # openWakeWord è allineato internamente. Un singolo
+        # blocco da 30ms può generare più chunk pronti (o zero,
+        # se non abbiamo ancora accumulato abbastanza campioni).
         self.wake_buffer = np.concatenate(
             (self.wake_buffer, mono)
         )
