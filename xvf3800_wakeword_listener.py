@@ -31,11 +31,19 @@ CHANNELS = 2
 
 WAKEWORD = "hey_jarvis"
 
-# NOTA affidabilità: partiamo da una soglia leggermente più
-# permissiva rispetto a 0.35 ora che il modello riceve chunk
-# audio correttamente allineati (vedi WAKE_CHUNK_SAMPLES sotto).
+# ------------------------------------------------------------
+# Soglia a due livelli
+# ------------------------------------------------------------
+# Un singolo chunk molto sicuro scatta subito (WAKE_THRESHOLD_HIGH).
+# Un chunk meno sicuro (parlato più debole/distante/mugugnato)
+# richiede conferma su più chunk consecutivi sopra una soglia più
+# bassa (WAKE_THRESHOLD_LOW + WAKE_CONFIRM_CHUNKS): cattura più
+# pronunce reali senza abbassare la soglia unica e aumentare i
+# falsi positivi su rumore.
 # Ritara osservando i valori reali negli score [WAKE-DEBUG].
-WAKE_THRESHOLD = 0.30
+WAKE_THRESHOLD_HIGH = 0.45
+WAKE_THRESHOLD_LOW = 0.20
+WAKE_CONFIRM_CHUNKS = 2
 
 # openWakeWord è progettato per ricevere audio in blocchi da
 # esattamente 80ms (1280 campioni a 16kHz): è la dimensione con
@@ -48,9 +56,27 @@ WAKE_THRESHOLD = 0.30
 # costringono a ripetere la wake word più volte).
 WAKE_CHUNK_SAMPLES = 1280
 
+# Overlap tra chunk successivi: invece di tagliare l'audio in
+# blocchi consecutivi non sovrapposti (hop = WAKE_CHUNK_SAMPLES,
+# comportamento precedente), avanziamo di un hop più piccolo.
+# Così, se la parola cade a cavallo del confine tra due chunk,
+# esiste comunque una finestra successiva che la contiene per
+# intero e allineata: il modello ha più occasioni di riconoscerla.
+# Onere in più: circa 2x le chiamate a model.predict() (ancora
+# trascurabile per un modello di wake word così piccolo). Per
+# tornare al comportamento senza overlap, imposta
+# WAKE_HOP_SAMPLES = WAKE_CHUNK_SAMPLES.
+WAKE_HOP_SAMPLES = 640
+
+# Battito cardiaco: una riga leggera ogni tot secondi mentre si
+# è in ascolto, per confermare che il processo è vivo anche con
+# DEBUG_LOGGING spento (utile per distinguere "in ascolto in
+# silenzio" da "bloccato per davvero").
+ALIVE_LOG_INTERVAL = 15.0
+
 # Stampa lo score della wake word anche quando resta sotto
-# soglia, per poter tarare WAKE_THRESHOLD osservando i valori
-# reali durante l'uso.
+# soglia, per poter tarare WAKE_THRESHOLD_HIGH/LOW osservando i
+# valori reali durante l'uso.
 WAKE_DEBUG_INTERVAL = 1.0
 
 BLOCK_MS = 30
@@ -224,6 +250,56 @@ def angle_distance(a, b):
         d = 360.0 - d
 
     return d
+
+
+# ------------------------------------------------------------
+# Parametri per il guadagno automatico applicato ai chunk prima
+# della wake word (vedi normalize_wake_gain sotto).
+# ------------------------------------------------------------
+
+WAKE_AGC_TARGET_PEAK = 0.5
+WAKE_AGC_MAX_GAIN = 4.0
+WAKE_AGC_SILENCE_FLOOR = 50
+
+
+def normalize_wake_gain(chunk):
+    """
+    Applica un guadagno automatico leggero al chunk prima di
+    passarlo al modello di wake word: se si parla da un po' più
+    lontano o a volume basso, il segnale può arrivare sotto il
+    livello su cui il modello è stato addestrato, abbassando lo
+    score anche per una pronuncia corretta.
+
+    Non amplifica se il chunk è praticamente silenzio/rumore di
+    fondo (eviterebbe solo di alzare il rumore stesso), e limita
+    il guadagno massimo per non introdurre distorsione o
+    amplificare eccessivamente un click/rumore isolato.
+    """
+
+    chunk_f = chunk.astype(np.float32)
+
+    peak = np.max(np.abs(chunk_f))
+
+    if peak < WAKE_AGC_SILENCE_FLOOR:
+        return chunk
+
+    target = 32767.0 * WAKE_AGC_TARGET_PEAK
+
+    gain = min(
+        target / peak,
+        WAKE_AGC_MAX_GAIN
+    )
+
+    if gain <= 1.0:
+        return chunk
+
+    boosted = np.clip(
+        chunk_f * gain,
+        -32768,
+        32767
+    )
+
+    return boosted.astype(np.int16)
 
 
 # ============================================================
@@ -825,6 +901,11 @@ class WakeWordListener:
         # correttamente allineati da WAKE_CHUNK_SAMPLES (80ms).
         self.wake_buffer = np.zeros(0, dtype=np.int16)
 
+        # Quanti chunk consecutivi sopra WAKE_THRESHOLD_LOW ma
+        # sotto WAKE_THRESHOLD_HIGH abbiamo visto finora (per il
+        # trigger a due livelli, vedi check_wakeword).
+        self.wake_confirm_count = 0
+
         # Ultimo score realmente calcolato dal modello (aggiornato
         # solo quando un chunk da 80ms è stato effettivamente
         # processato), usato per il debug periodico.
@@ -1083,12 +1164,13 @@ class WakeWordListener:
 
         mono = audio[:, 0]
 
-        # Accumuliamo i campioni ricevuti (blocchi da 30ms) e li
-        # passiamo al modello solo in chunk da esattamente
-        # WAKE_CHUNK_SAMPLES (80ms), la dimensione con cui
-        # openWakeWord è allineato internamente. Un singolo
-        # blocco da 30ms può generare più chunk pronti (o zero,
-        # se non abbiamo ancora accumulato abbastanza campioni).
+        # Accumuliamo i campioni ricevuti (blocchi da 30ms) in un
+        # buffer scorrevole e ne estraiamo finestre da esattamente
+        # WAKE_CHUNK_SAMPLES (80ms, l'allineamento con cui
+        # openWakeWord lavora internamente), facendole avanzare di
+        # WAKE_HOP_SAMPLES invece di consumare l'intero chunk: così
+        # le finestre si sovrappongono e la parola ha più occasioni
+        # di cadere allineata per intero in almeno una di esse.
         self.wake_buffer = np.concatenate(
             (self.wake_buffer, mono)
         )
@@ -1101,7 +1183,11 @@ class WakeWordListener:
             chunk = self.wake_buffer[:WAKE_CHUNK_SAMPLES]
 
             self.wake_buffer = (
-                self.wake_buffer[WAKE_CHUNK_SAMPLES:]
+                self.wake_buffer[WAKE_HOP_SAMPLES:]
+            )
+
+            chunk = normalize_wake_gain(
+                chunk
             )
 
             prediction = self.model.predict(
@@ -1116,10 +1202,34 @@ class WakeWordListener:
             if score > best_score:
                 best_score = score
 
-            if score >= WAKE_THRESHOLD:
+            self.last_wake_score = score
+
+            # ------------------------------------------------
+            # TRIGGER A DUE LIVELLI
+            # ------------------------------------------------
+
+            if score >= WAKE_THRESHOLD_HIGH:
+
                 wake_detected = True
 
-            self.last_wake_score = score
+                self.wake_confirm_count = 0
+
+            elif score >= WAKE_THRESHOLD_LOW:
+
+                self.wake_confirm_count += 1
+
+                if (
+                    self.wake_confirm_count
+                    >= WAKE_CONFIRM_CHUNKS
+                ):
+
+                    wake_detected = True
+
+                    self.wake_confirm_count = 0
+
+            else:
+
+                self.wake_confirm_count = 0
 
         now = time.monotonic()
 
@@ -1133,7 +1243,8 @@ class WakeWordListener:
 
             print(
                 f"[WAKE-DEBUG] score={self.last_wake_score:.3f} "
-                f"threshold={WAKE_THRESHOLD}"
+                f"high={WAKE_THRESHOLD_HIGH} "
+                f"low={WAKE_THRESHOLD_LOW}"
             )
 
         return wake_detected, best_score
@@ -1578,7 +1689,14 @@ class WakeWordListener:
                 )
                 print(
                     f"Threshold   : "
-                    f"{WAKE_THRESHOLD}"
+                    f"high={WAKE_THRESHOLD_HIGH} "
+                    f"low={WAKE_THRESHOLD_LOW} "
+                    f"(x{WAKE_CONFIRM_CHUNKS} chunk)"
+                )
+                print(
+                    f"Chunk/hop   : "
+                    f"{WAKE_CHUNK_SAMPLES}/"
+                    f"{WAKE_HOP_SAMPLES} campioni"
                 )
                 print(
                     f"Start ratio : "
@@ -1671,6 +1789,19 @@ class WakeWordListener:
                             )
                         )
 
+                        if (
+                            now - self.last_alive_print
+                            >= ALIVE_LOG_INTERVAL
+                        ):
+
+                            self.last_alive_print = now
+
+                            print(
+                                f"[LISTENER] in ascolto "
+                                f"(score wake attuale: "
+                                f"{self.last_wake_score:.3f})"
+                            )
+
                         if wake:
 
                             print()
@@ -1697,6 +1828,8 @@ class WakeWordListener:
                             self.direction_confirmations = 0
 
                             self.speech_start_candidate = None
+
+                            self.wake_confirm_count = 0
 
                             # Catturiamo subito la direzione da
                             # cui è arrivata la wake word stessa:
