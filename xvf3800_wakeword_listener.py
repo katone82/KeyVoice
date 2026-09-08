@@ -24,7 +24,7 @@ from openwakeword.model import Model
 # della pipeline (wake, direzione, inizio/fine comando, salvataggio
 # WAV). Metti a True solo quando serve ritarare soglie o
 # diagnosticare un problema.
-DEBUG_LOGGING = False
+DEBUG_LOGGING = True
 
 TARGET_SAMPLE_RATE = 16000
 DEVICE_SAMPLE_RATE = 16000
@@ -148,16 +148,28 @@ DIRECTION_MIN_ENERGY = 1.0
 
 DIRECTION_CONFIRMATIONS = 3
 
-DIRECTION_ANGLE_TOLERANCE = 35.0
+# NOTA affidabilità: in ambienti riverberanti la direzione
+# stimata dalla telemetria XVF può "saltare" anche di parecchie
+# decine di gradi sulla STESSA sorgente (riflessioni sui muri),
+# non solo quando cambia davvero chi sta parlando. Con valori
+# troppo stretti qui, process_recording() zittisce (sostituisce
+# con silenzio) blocchi di parlato reale a metà comando, "bucando"
+# l'audio inviato a Vosk e peggiorando il riconoscimento anche
+# quando la wake word e la voce erano perfettamente chiare.
+DIRECTION_ANGLE_TOLERANCE = 60.0
 
-DIRECTION_LOST_GRACE_SECONDS = 0.18
+DIRECTION_LOST_GRACE_SECONDS = 0.5
 
 # Quando scatta la wake word, cerchiamo nello storico telemetria
 # la lettura di direzione più energica negli ultimi N secondi:
 # copre la coda dell'utterance "hey jarvis" (l'engine di wake
 # word finalizza il riconoscimento con un piccolo ritardo dopo
-# che la frase è stata pronunciata).
-WAKE_DIRECTION_LOOKBACK_SECONDS = 0.6
+# che la frase è stata pronunciata). Allargata da 0.6 a 1.0s: la
+# telemetria XVF ha spesso letture a energia zero anche durante
+# il parlato (poll ogni 100ms, non sincronizzato con la voce),
+# quindi una finestra più ampia aumenta le probabilità di trovare
+# almeno una lettura valida ed evitare il fallback più lento.
+WAKE_DIRECTION_LOOKBACK_SECONDS = 1.0
 
 # Quanta storia di telemetria conserviamo per il lookback sopra.
 XVF_HISTORY_SECONDS = 2.0
@@ -1578,10 +1590,19 @@ class WakeWordListener:
 
         # --------------------------------------------
         # TIMEOUT
+        #
+        # Non scatta se in questo momento c'è già un
+        # candidato vocale attivo: significherebbe scartare
+        # un'utterance reale appena rilevata (può succedere
+        # se la ricostruzione della direzione, nel fallback,
+        # ha richiesto quasi tutta la finestra di timeout).
+        # Basta un ciclo in più per confermarlo o scartarlo
+        # naturalmente.
         # --------------------------------------------
 
         if (
-            now - self.wake_time
+            self.speech_start_candidate is None
+            and now - self.wake_time
             >= COMMAND_TIMEOUT_SECONDS
         ):
 
