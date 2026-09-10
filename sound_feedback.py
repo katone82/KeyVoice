@@ -84,25 +84,22 @@ def apply_config(cfg):
         "device", COMMAND_SOUND_DEVICE
     )
 
+    def _resolve(path_override):
+        if os.path.isabs(path_override):
+            return path_override
+        return os.path.abspath(
+            os.path.join(SCRIPT_DIR, path_override)
+        )
+
     ok_override = cfg.get("ok_file")
 
     if ok_override:
-        if os.path.isabs(ok_override):
-            COMMAND_OK_FILE = ok_override
-        else:
-            COMMAND_OK_FILE = os.path.abspath(
-                os.path.join(SCRIPT_DIR, ok_override)
-            )
+        COMMAND_OK_FILE = _resolve(ok_override)
 
     error_override = cfg.get("error_file")
 
     if error_override:
-        if os.path.isabs(error_override):
-            COMMAND_ERROR_FILE = error_override
-        else:
-            COMMAND_ERROR_FILE = os.path.abspath(
-                os.path.join(SCRIPT_DIR, error_override)
-            )
+        COMMAND_ERROR_FILE = _resolve(error_override)
 
     for label, path in (
         ("ok_file", COMMAND_OK_FILE),
@@ -125,49 +122,73 @@ def apply_config(cfg):
 # RIPRODUZIONE
 # ============================================================
 
-def _play(path: str, label: str) -> None:
+def _play_one(path: str, label: str) -> bool:
+    """
+    Riproduce un singolo file (bloccante: aplay -D ... termina
+    da solo a fine file). Ritorna False se il file manca o aplay
+    fallisce, solo per logging da parte del chiamante.
+    """
+
+    if not os.path.isfile(path):
+        print(f"[SOUND] File non trovato ({label}): {path}")
+        return False
+
+    try:
+        result = subprocess.run(
+            [
+                "aplay",
+                "-q",
+                "-D",
+                COMMAND_SOUND_DEVICE,
+                path
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5.0
+        )
+
+        if result.returncode != 0:
+            print(
+                f"[SOUND] aplay fallito ({label}, "
+                f"device={COMMAND_SOUND_DEVICE}, "
+                f"file={path}): {result.stderr.strip()}"
+            )
+            return False
+
+    except Exception as exc:
+        print(f"[SOUND] Errore riproduzione {label}: {exc}")
+        return False
+
+    return True
+
+
+def _play_sequence(paths, label: str) -> None:
+    """
+    Riproduce piu' file in sequenza (uno dopo l'altro, aspettando
+    che ciascuno finisca) su un thread separato, per non bloccare
+    il chiamante (thread fuzzy/HA) per la durata della
+    riproduzione. Stessa logica di base di play_beep() in
+    xvf3800_wakeword_listener.py, estesa a piu' file.
+    """
 
     if not COMMAND_FEEDBACK_ENABLED:
         return
 
-    if not os.path.isfile(path):
-        print(f"[SOUND] File non trovato ({label}): {path}")
-        return
-
     def _run():
-        try:
-            result = subprocess.run(
-                [
-                    "aplay",
-                    "-q",
-                    "-D",
-                    COMMAND_SOUND_DEVICE,
-                    path
-                ],
-                capture_output=True,
-                text=True,
-                timeout=5.0
-            )
+        for path in paths:
+            _play_one(path, label)
 
-            if result.returncode != 0:
-                print(
-                    f"[SOUND] aplay fallito ({label}, "
-                    f"device={COMMAND_SOUND_DEVICE}, "
-                    f"file={path}): {result.stderr.strip()}"
-                )
-
-        except Exception as exc:
-            print(f"[SOUND] Errore riproduzione {label}: {exc}")
-
-    # Thread separato per non bloccare il chiamante (thread
-    # fuzzy/HA) per la durata della riproduzione, stessa logica
-    # di play_beep() in xvf3800_wakeword_listener.py.
     threading.Thread(target=_run, daemon=True).start()
 
 
 def play_command_ok() -> None:
-    """Comando capito ED eseguito con successo su Home Assistant."""
-    _play(COMMAND_OK_FILE, "command_ok")
+    """
+    Comando capito ED eseguito con successo su Home Assistant.
+    Solo command_ok.wav: il beep di wake word (wake.wav) resta
+    di competenza esclusiva di xvf3800_wakeword_listener.py al
+    momento del rilevamento della wake word, non va ripetuto qui.
+    """
+    _play_sequence([COMMAND_OK_FILE], "command_ok")
 
 
 def play_command_error() -> None:
@@ -175,4 +196,4 @@ def play_command_error() -> None:
     Comando NON eseguito: non riconosciuto dal fuzzy parser,
     oppure riconosciuto ma fallito lato Home Assistant.
     """
-    _play(COMMAND_ERROR_FILE, "command_error")
+    _play_sequence([COMMAND_ERROR_FILE], "command_error")
