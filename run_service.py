@@ -10,7 +10,7 @@ import debug_config
 import sound_feedback
 from vosk_listener import vosk_listener
 from xvf3800_wakeword_listener import WakeWordListener, apply_config
-from fuzzy_parser import init_fuzzy, processa_comandi, command_queue, stop_event
+from fuzzy_parser import init_fuzzy, processa_comandi, command_queue, stop_event, timer_command_consumer
 
 # ==============================
 # CARICA CONFIGURAZIONE ESTERNA
@@ -136,11 +136,13 @@ t_fuzzy = threading.Thread(target=processa_comandi, daemon=True)
 ha_url = CONFIG['homeassistant']['url'].rstrip('/') + '/api/services'
 ha_token = CONFIG['homeassistant']['token']
 t_ha = threading.Thread(target=ha_command_consumer, args=(ha_url, ha_token), daemon=True)
+t_timer = threading.Thread(target=timer_command_consumer, daemon=True)
 
 t_vosk.start()
 t_wakeword.start()
 t_fuzzy.start()
 t_ha.start()
+t_timer.start()
 
 # ==============================
 # Attesa componenti davvero pronti
@@ -169,4 +171,5 @@ except KeyboardInterrupt:
     t_wakeword.join()
     t_fuzzy.join()
     t_ha.join()
+    t_timer.join()
     print("[MAIN] Tutto terminato.")

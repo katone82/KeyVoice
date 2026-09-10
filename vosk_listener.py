@@ -10,6 +10,11 @@ import numpy as np
 import vosk
 from scipy.signal import resample_poly
 
+from numeri_italiani import (
+    numero_in_parole,
+    parola_numero_singolare,
+)
+
 
 # ============================================================
 # CONFIGURAZIONE
@@ -21,6 +26,39 @@ DOMOTICA_FILENAME = "domotica.json"
 SYNONYMS_FILENAME = "azione_synonyms.json"
 
 UNKNOWN_TOKEN = "[unk]"
+
+
+# ============================================================
+# CONFIGURAZIONE TIMER
+# ============================================================
+
+# Prefissi accettati per avviare un timer. La durata (minuti
+# o ore) viene aggiunta subito dopo, es.:
+#
+#   "imposta timer di dieci minuti"
+#   "avvia un timer di due ore"
+#
+TIMER_AVVIO_PREFISSI = [
+    "timer",
+    "imposta timer",
+    "imposta un timer",
+    "avvia timer",
+    "avvia un timer",
+    "metti un timer",
+    "crea timer",
+]
+
+TIMER_CANCELLA_FRASI = [
+    "cancella timer",
+    "cancella il timer",
+    "ferma timer",
+    "ferma il timer",
+    "annulla timer",
+    "stop timer",
+]
+
+TIMER_MAX_MINUTI = 60
+TIMER_MAX_ORE = 12
 
 
 # ============================================================
@@ -284,6 +322,65 @@ def load_actions(
 
 
 # ============================================================
+# COSTRUZIONE GRAMMATICA TIMER
+# ============================================================
+
+def build_timer_grammar() -> set[str]:
+    """
+    Genera le frasi del timer vocale.
+
+    La grammatica Vosk è chiusa: non esiste dettatura libera
+    di numeri, quindi ogni combinazione prefisso/durata deve
+    essere elencata esplicitamente.
+    """
+
+    frasi = set()
+
+    for prefisso in TIMER_AVVIO_PREFISSI:
+
+        for minuti in range(1, TIMER_MAX_MINUTI + 1):
+
+            unita = (
+                "minuto"
+                if minuti == 1
+                else "minuti"
+            )
+
+            frasi.add(
+                normalize_text(
+                    f"{prefisso} di "
+                    f"{parola_numero_singolare(minuti)} "
+                    f"{unita}"
+                )
+            )
+
+        for ore in range(1, TIMER_MAX_ORE + 1):
+
+            unita = (
+                "ora"
+                if ore == 1
+                else "ore"
+            )
+
+            frasi.add(
+                normalize_text(
+                    f"{prefisso} di "
+                    f"{parola_numero_singolare(ore)} "
+                    f"{unita}"
+                )
+            )
+
+    for frase in TIMER_CANCELLA_FRASI:
+        frasi.add(
+            normalize_text(
+                frase
+            )
+        )
+
+    return frasi
+
+
+# ============================================================
 # COSTRUZIONE GRAMMATICA
 # ============================================================
 
@@ -375,6 +472,16 @@ def build_vosk_grammar() -> list[str]:
                 )
 
     # ========================================================
+    # TIMER
+    # ========================================================
+
+    timer_grammar = build_timer_grammar()
+
+    grammar.update(
+        timer_grammar
+    )
+
+    # ========================================================
     # UNKNOWN
     # ========================================================
 
@@ -398,6 +505,11 @@ def build_vosk_grammar() -> list[str]:
     print(
         f"[VOLK]   varianti azioni: "
         f"{len(action_variants)}"
+    )
+
+    print(
+        f"[VOLK]   frasi timer: "
+        f"{len(timer_grammar)}"
     )
 
     print(

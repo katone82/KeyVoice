@@ -10,6 +10,7 @@ import requests
 from rapidfuzz import process
 
 import sound_feedback
+from numeri_italiani import PAROLA_A_NUMERO
 
 
 # ============================================================
@@ -18,6 +19,7 @@ import sound_feedback
 
 command_queue = queue.Queue()
 ha_command_queue = queue.Queue()
+timer_command_queue = queue.Queue()
 
 stop_event = threading.Event()
 
@@ -32,12 +34,40 @@ SYNONYMS_FILE = ""
 HA_URL = ""
 HA_TOKEN = ""
 
+TIMER_SERVICE_URL = "http://127.0.0.1:8090"
+
 AZIONI = []
 ENTITA = []
 STANZE = []
 
 MAPPING = {}
 AZIONE_SYNONYMS = {}
+
+
+# ============================================================
+# CONFIGURAZIONE TIMER VOCALE
+# ============================================================
+
+# Parole che indicano una richiesta di cancellazione del
+# timer attivo. Devono comparire insieme alla parola "timer"
+# nella frase riconosciuta.
+TIMER_CANCELLA_KEYWORDS = {
+    "cancella",
+    "ferma",
+    "annulla",
+    "stop",
+}
+
+TIMER_UNITA_SECONDI = {
+    "minuto": 60,
+    "minuti": 60,
+    "ora": 3600,
+    "ore": 3600,
+}
+
+# Un solo timer vocale attivo alla volta: id dell'ultimo
+# timer creato, usato dal comando di cancellazione.
+_active_timer_id = None
 
 
 # ============================================================
@@ -350,6 +380,7 @@ def init_fuzzy(config: dict):
     global SYNONYMS_FILE
     global HA_URL
     global HA_TOKEN
+    global TIMER_SERVICE_URL
     global AZIONI
 
     config_path = config[
@@ -376,6 +407,14 @@ def init_fuzzy(config: dict):
     ][
         "token"
     ]
+
+    TIMER_SERVICE_URL = config.get(
+        "timer_service",
+        {}
+    ).get(
+        "url",
+        TIMER_SERVICE_URL
+    ).rstrip("/")
 
     AZIONI = config.get(
         "azioni",
@@ -693,6 +732,72 @@ def trova_stanza(
 
 
 # ============================================================
+# RICONOSCIMENTO COMANDO TIMER
+# ============================================================
+
+def estrai_durata(
+    frase_norm: str
+):
+    """
+    Cerca nella frase la coppia "<numero> <unità>"
+    (es. "dieci minuti", "un ora") e restituisce la durata
+    in secondi, oppure None se non trovata.
+    """
+
+    parole = frase_norm.split()
+
+    for indice, parola in enumerate(parole):
+
+        if parola not in TIMER_UNITA_SECONDI:
+            continue
+
+        if indice == 0:
+            continue
+
+        precedente = parole[indice - 1]
+
+        numero = PAROLA_A_NUMERO.get(
+            precedente
+        )
+
+        if numero:
+            return numero * TIMER_UNITA_SECONDI[parola]
+
+    return None
+
+
+def rileva_comando_timer(
+    frase_norm: str
+):
+    """
+    Riconosce un comando timer nella frase già normalizzata.
+
+    Restituisce una tupla (tipo, durata_secondi):
+      - ("avvia", durata) se viene richiesto un nuovo timer
+      - ("cancella", None) se viene richiesta la cancellazione
+
+    Restituisce None se la frase non è un comando timer.
+    """
+
+    parole = frase_norm.split()
+
+    if "timer" not in parole:
+        return None
+
+    if TIMER_CANCELLA_KEYWORDS & set(parole):
+        return ("cancella", None)
+
+    durata = estrai_durata(
+        frase_norm
+    )
+
+    if durata:
+        return ("avvia", durata)
+
+    return None
+
+
+# ============================================================
 # PARSER FUZZY PRINCIPALE
 # ============================================================
 
@@ -792,6 +897,38 @@ def processa_comandi():
             continue
 
         try:
+            frase_norm = normalize(
+                frase
+            )
+
+            timer_cmd = rileva_comando_timer(
+                frase_norm
+            )
+
+            if timer_cmd:
+                tipo, durata = timer_cmd
+
+                print(
+                    "[COMANDI] Comando timer riconosciuto: "
+                    f"{tipo} {durata}"
+                )
+
+                if profile != "test":
+                    timer_command_queue.put(
+                        {
+                            "tipo": tipo,
+                            "durata": durata
+                        }
+                    )
+
+                else:
+                    print(
+                        "[COMANDI] Modalità TEST: "
+                        "comando timer non inviato"
+                    )
+
+                continue
+
             (
                 azione_finale,
                 entita_finale,
@@ -901,3 +1038,105 @@ def ha_command_consumer():
 
         finally:
             ha_command_queue.task_done()
+
+
+# ============================================================
+# THREAD TIMER SERVICE
+# ============================================================
+
+def timer_command_consumer():
+    global _active_timer_id
+
+    print(
+        "[TIMER] Thread consumer avviato"
+    )
+
+    while not stop_event.is_set():
+        try:
+            comando = timer_command_queue.get(
+                timeout=1
+            )
+
+        except queue.Empty:
+            continue
+
+        try:
+            if comando["tipo"] == "avvia":
+
+                risposta = requests.post(
+                    f"{TIMER_SERVICE_URL}/timers",
+                    json={
+                        "duration": comando["durata"]
+                    },
+                    timeout=5,
+                )
+
+                if risposta.ok:
+                    _active_timer_id = risposta.json()["id"]
+
+                    print(
+                        "[TIMER] Timer avviato: "
+                        f"{_active_timer_id} "
+                        f"({comando['durata']}s)"
+                    )
+
+                    sound_feedback.play_command_ok()
+
+                else:
+                    print(
+                        "[TIMER] Errore avvio timer: "
+                        f"{risposta.status_code} "
+                        f"{risposta.text}"
+                    )
+
+                    sound_feedback.play_command_error()
+
+            elif comando["tipo"] == "cancella":
+
+                if not _active_timer_id:
+                    print(
+                        "[TIMER] Nessun timer attivo "
+                        "da cancellare"
+                    )
+
+                    sound_feedback.play_command_error()
+
+                else:
+                    risposta = requests.post(
+                        f"{TIMER_SERVICE_URL}/timers/"
+                        f"{_active_timer_id}/cancel",
+                        timeout=5,
+                    )
+
+                    if risposta.ok:
+                        print(
+                            "[TIMER] Timer cancellato: "
+                            f"{_active_timer_id}"
+                        )
+
+                        sound_feedback.play_command_ok()
+
+                        _active_timer_id = None
+
+                    else:
+                        print(
+                            "[TIMER] Errore cancellazione "
+                            "timer: "
+                            f"{risposta.status_code} "
+                            f"{risposta.text}"
+                        )
+
+                        sound_feedback.play_command_error()
+
+        except Exception as exc:
+            print(
+                "[TIMER] Errore comunicazione con "
+                f"timer_service: {exc}"
+            )
+
+            traceback.print_exc()
+
+            sound_feedback.play_command_error()
+
+        finally:
+            timer_command_queue.task_done()
