@@ -47,6 +47,22 @@ WAKE_THRESHOLD_HIGH = 0.45
 WAKE_THRESHOLD_LOW = 0.15
 WAKE_CONFIRM_CHUNKS = 3
 
+# Dopo la fine di un comando (reset_to_listening), per questa
+# finestra la wake word scatta SOLO tramite la soglia alta a
+# singolo chunk (score >= WAKE_THRESHOLD_HIGH): il percorso a
+# soglia bassa + conferma multi-chunk viene disattivato.
+#
+# Motivo: subito dopo un comando (click del relè di uno switch,
+# coda del beep, rumore residuo dalla stessa direzione appena
+# bloccata) capita un punteggio debole ma sostenuto su più chunk
+# che con WAKE_THRESHOLD_LOW/WAKE_CONFIRM_CHUNKS normali arriva
+# comunque a scattare come falsa wake word, facendo partire una
+# registrazione fantasma. Una vera ripetizione della wake word
+# resta comunque riconosciuta perché supera la soglia alta in un
+# singolo chunk; è solo il percorso "debole ma ripetuto", più
+# vulnerabile al rumore, a essere sospeso per un po'.
+WAKE_POST_COMMAND_STRICT_SECONDS = 2.0
+
 # openWakeWord è progettato per ricevere audio in blocchi da
 # esattamente 80ms (1280 campioni a 16kHz): è la dimensione con
 # cui la sua pipeline di melspectrogram + embedding è allineata.
@@ -281,16 +297,21 @@ def apply_config(cfg):
             "threshold_high": 0.45,
             "threshold_low": 0.15,
             "confirm_chunks": 3,
+            "post_command_strict_seconds": 2.0,
             "pre_roll_seconds": 0.25,
             "post_wake_ignore_seconds": 0.40,
             "command_timeout_seconds": 4.0,
             "max_command_seconds": 6.0,
             "speech_start_ratio": 2.5,
             "speech_end_ratio": 1.5,
+            "speech_start_time": 0.03,
             "speech_end_time": 0.60,
             "direction_angle_tolerance": 60.0,
             "direction_lost_grace_seconds": 0.5,
             "direction_min_dominance": 1.2,
+            "direction_min_energy": 1.0,
+            "direction_confirmations": 3,
+            "wake_direction_lookback_seconds": 1.0,
             "hw_speech_gate_enabled": true,
             "agc_max_gain": 8.0,
             "agc_silence_floor": 15,
@@ -303,11 +324,15 @@ def apply_config(cfg):
 
     global WAKEWORD
     global WAKE_THRESHOLD_HIGH, WAKE_THRESHOLD_LOW, WAKE_CONFIRM_CHUNKS
+    global WAKE_POST_COMMAND_STRICT_SECONDS
     global PRE_ROLL_SECONDS, POST_WAKE_IGNORE_SECONDS
     global COMMAND_TIMEOUT_SECONDS, MAX_COMMAND_SECONDS
     global SPEECH_START_RATIO, SPEECH_END_RATIO, SPEECH_END_TIME
+    global SPEECH_START_TIME
     global DIRECTION_ANGLE_TOLERANCE, DIRECTION_LOST_GRACE_SECONDS
-    global DIRECTION_MIN_DOMINANCE
+    global DIRECTION_MIN_DOMINANCE, DIRECTION_MIN_ENERGY
+    global DIRECTION_CONFIRMATIONS
+    global WAKE_DIRECTION_LOOKBACK_SECONDS
     global WAKE_HW_SPEECH_GATE_ENABLED
     global WAKE_AGC_MAX_GAIN, WAKE_AGC_SILENCE_FLOOR
     global WAKE_AUDIO_CHANNEL
@@ -327,6 +352,10 @@ def apply_config(cfg):
     )
     WAKE_CONFIRM_CHUNKS = cfg.get(
         "confirm_chunks", WAKE_CONFIRM_CHUNKS
+    )
+    WAKE_POST_COMMAND_STRICT_SECONDS = cfg.get(
+        "post_command_strict_seconds",
+        WAKE_POST_COMMAND_STRICT_SECONDS
     )
 
     PRE_ROLL_SECONDS = cfg.get(
@@ -351,6 +380,9 @@ def apply_config(cfg):
     SPEECH_END_TIME = cfg.get(
         "speech_end_time", SPEECH_END_TIME
     )
+    SPEECH_START_TIME = cfg.get(
+        "speech_start_time", SPEECH_START_TIME
+    )
 
     DIRECTION_ANGLE_TOLERANCE = cfg.get(
         "direction_angle_tolerance", DIRECTION_ANGLE_TOLERANCE
@@ -361,6 +393,16 @@ def apply_config(cfg):
     )
     DIRECTION_MIN_DOMINANCE = cfg.get(
         "direction_min_dominance", DIRECTION_MIN_DOMINANCE
+    )
+    DIRECTION_MIN_ENERGY = cfg.get(
+        "direction_min_energy", DIRECTION_MIN_ENERGY
+    )
+    DIRECTION_CONFIRMATIONS = cfg.get(
+        "direction_confirmations", DIRECTION_CONFIRMATIONS
+    )
+    WAKE_DIRECTION_LOOKBACK_SECONDS = cfg.get(
+        "wake_direction_lookback_seconds",
+        WAKE_DIRECTION_LOOKBACK_SECONDS
     )
 
     WAKE_HW_SPEECH_GATE_ENABLED = cfg.get(
@@ -1226,6 +1268,13 @@ class WakeWordListener:
 
         self.cooldown_until = 0.0
 
+        # Timestamp (time.monotonic) dell'ultima volta che siamo
+        # tornati verso LISTENING dopo un comando (reset_to_listening).
+        # Inizializzato a 0.0: all'avvio del processo non c'è
+        # nessun comando precedente, quindi la finestra "strict"
+        # in check_wakeword() risulta già scaduta fin da subito.
+        self.command_finished_at = 0.0
+
         self.last_wake_debug = 0.0
 
         # Buffer per accumulare i campioni (arrivano a blocchi di
@@ -1678,6 +1727,11 @@ class WakeWordListener:
         wake_detected = False
         best_score = 0.0
 
+        in_strict_window = (
+            time.monotonic() - self.command_finished_at
+            < WAKE_POST_COMMAND_STRICT_SECONDS
+        )
+
         while len(self.wake_buffer) >= WAKE_CHUNK_SAMPLES:
 
             chunk = self.wake_buffer[:WAKE_CHUNK_SAMPLES]
@@ -1717,7 +1771,10 @@ class WakeWordListener:
 
                 self.wake_confirm_count = 0
 
-            elif score >= WAKE_THRESHOLD_LOW:
+            elif (
+                not in_strict_window
+                and score >= WAKE_THRESHOLD_LOW
+            ):
 
                 self.wake_confirm_count += 1
 
@@ -1749,7 +1806,8 @@ class WakeWordListener:
                 f"high={WAKE_THRESHOLD_HIGH} "
                 f"low={WAKE_THRESHOLD_LOW} "
                 f"peak={self.last_wake_peak:.0f} "
-                f"gain={self.last_wake_gain:.2f}x"
+                f"gain={self.last_wake_gain:.2f}x "
+                f"strict={'Y' if in_strict_window else 'N'}"
             )
 
         return wake_detected, best_score
@@ -2271,6 +2329,10 @@ class WakeWordListener:
         self.cooldown_until = (
             time.monotonic()
             + 0.5
+        )
+
+        self.command_finished_at = (
+            time.monotonic()
         )
 
         self.command_audio = []
