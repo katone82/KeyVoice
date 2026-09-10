@@ -23,12 +23,22 @@ TARGET_SAMPLE_RATE = 16000
 DEVICE_SAMPLE_RATE = 16000
 CHANNELS = 2
 
-# Canale usato SOLO per la wake word (RMS/direzione continuano a
-# usare il canale 0). Se il canale 1 del reSpeaker porta un
-# segnale processato diversamente (es. output con AEC/NS attivi
-# invece del raw), può dare uno score più alto a distanza. Prova
-# a metterlo a 1 e confronta gli score in [WAKE-DEBUG] a parità
-# di distanza/voce.
+# Canale usato SOLO per la wake word (RMS/direzione/Vosk
+# continuano a usare il canale 0). Per default firmware
+# (documentazione ufficiale XMOS/reSpeaker, nessun comando al
+# chip necessario) il canale sinistro (0) è l'uscita
+# "communication": beamforming + AEC + post-process non lineare
+# (noise suppression/limiter aggressivi, pensati per l'ascolto
+# umano). Il canale destro (1) è invece l'uscita ASR del beam
+# auto-selezionato: il chip mantiene un beam libero che scandisce
+# l'ambiente, individua la sorgente dominante e ci punta uno dei
+# beam focalizzati, selezionando automaticamente il segnale
+# migliore — e NON passa per il post-process non lineare, perché
+# quel tipo di elaborazione danneggia (non aiuta) un motore
+# ASR/wake-word. In ambienti rumorosi o con voce debole/distante,
+# il canale 1 è quindi il candidato giusto per la wake word:
+# prova a metterlo a 1 (wake_audio_channel in config.json) e
+# confronta gli score in [WAKE-DEBUG] a parità di distanza/voce.
 WAKE_AUDIO_CHANNEL = 0
 
 WAKEWORD = "hey_jarvis"
