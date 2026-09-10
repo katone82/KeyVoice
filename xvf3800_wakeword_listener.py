@@ -145,6 +145,18 @@ DIRECTION_MIN_ENERGY = 1.0
 
 DIRECTION_CONFIRMATIONS = 3
 
+# Richiede anche il flag "speech" letto da DOA_VALUE (vedi
+# XVF3800Telemetry, modulo GPO/LED del chip, resid 20) prima di
+# iniziare a registrare un comando in process_wait_command(): un
+# segnale indipendente dall'energia per beam di
+# AEC_SPENERGY_VALUES gia' usata per la dominanza direzionale.
+# Se il device/firmware non espone DOA_VALUE, il gate e'
+# fail-open (si comporta come se fosse disattivato) quindi
+# lasciarlo a True qui non rischia di rompere nulla su un
+# firmware che non lo supporta. Metti a False per disattivarlo
+# esplicitamente se in pratica risultasse inaffidabile.
+WAKE_HW_SPEECH_GATE_ENABLED = True
+
 # NOTA affidabilità: in ambienti riverberanti la direzione
 # stimata dalla telemetria XVF può "saltare" anche di parecchie
 # decine di gradi sulla STESSA sorgente (riflessioni sui muri),
@@ -279,6 +291,7 @@ def apply_config(cfg):
             "direction_angle_tolerance": 60.0,
             "direction_lost_grace_seconds": 0.5,
             "direction_min_dominance": 1.2,
+            "hw_speech_gate_enabled": true,
             "agc_max_gain": 8.0,
             "agc_silence_floor": 15,
             "wake_audio_channel": 0,
@@ -295,6 +308,7 @@ def apply_config(cfg):
     global SPEECH_START_RATIO, SPEECH_END_RATIO, SPEECH_END_TIME
     global DIRECTION_ANGLE_TOLERANCE, DIRECTION_LOST_GRACE_SECONDS
     global DIRECTION_MIN_DOMINANCE
+    global WAKE_HW_SPEECH_GATE_ENABLED
     global WAKE_AGC_MAX_GAIN, WAKE_AGC_SILENCE_FLOOR
     global WAKE_AUDIO_CHANNEL
     global BEEP_DEVICE, BEEP_FILE
@@ -347,6 +361,10 @@ def apply_config(cfg):
     )
     DIRECTION_MIN_DOMINANCE = cfg.get(
         "direction_min_dominance", DIRECTION_MIN_DOMINANCE
+    )
+
+    WAKE_HW_SPEECH_GATE_ENABLED = cfg.get(
+        "hw_speech_gate_enabled", WAKE_HW_SPEECH_GATE_ENABLED
     )
 
     WAKE_AGC_MAX_GAIN = cfg.get(
@@ -502,6 +520,23 @@ class XVF3800Telemetry:
         self.second_energy = 0.0
         self.dominance_ratio = 0.0
 
+        # Flag di rilevamento vocale letto da DOA_VALUE (modulo
+        # GPO/LED del chip, resid 20, cmdid 18 in xvf_host.py):
+        # payload[0] = DoA in gradi (0-359), payload[1] = 1 se il
+        # firmware rileva voce, 0 altrimenti. E' un segnale
+        # indipendente da AEC_SPENERGY_VALUES (resid 33, modulo
+        # AEC) usato sopra per dominant_energy/dominance_ratio:
+        # quel valore e' "energia nel beam", questo e' un giudizio
+        # booleano dedicato calcolato da un modulo diverso del
+        # firmware. None finche' non abbiamo mai ricevuto una
+        # lettura valida (device/firmware che non espone il
+        # parametro): i consumer trattano None come "non
+        # disponibile" e non bloccano nulla (fail-open).
+        self.hw_doa_angle = None
+        self.hw_speech_detected = None
+        self.hw_speech_seen = False
+        self.hw_speech_error_count = 0
+
         self.last_update = 0.0
 
         self.error_count = 0
@@ -587,7 +622,18 @@ class XVF3800Telemetry:
             "AEC_SPENERGY_VALUES"
         )
 
-        return list(azimuths), list(energies)
+        # DOA_VALUE non fa parte del modulo AEC (resid 33) come i
+        # due sopra: e' del modulo GPO/LED (resid 20), quello che
+        # pilota anche l'anello di LED sulla direzione di chi sta
+        # parlando. Isolato nel proprio try/except: se questo
+        # firmware/build non lo espone, non deve far fallire
+        # anche la lettura di azimuth/energia sopra.
+        try:
+            hw_doa = self.device.read("DOA_VALUE")
+        except Exception:
+            hw_doa = None
+
+        return list(azimuths), list(energies), hw_doa
 
     # --------------------------------------------------------
 
@@ -632,7 +678,7 @@ class XVF3800Telemetry:
 
             try:
 
-                azimuths, energies = self._read()
+                azimuths, energies, hw_doa = self._read()
 
                 if not azimuths or not energies:
                     raise RuntimeError(
@@ -733,6 +779,55 @@ class XVF3800Telemetry:
                     )
 
                 # ------------------------------------------------
+                # HW SPEECH FLAG (DOA_VALUE, resid 20)
+                #
+                # Segnale indipendente da AEC_SPENERGY_VALUES: se
+                # disponibile, aggiorniamo angolo+flag. Se questo
+                # firmware/device non lo espone (hw_doa resta
+                # None ad ogni ciclo), lasciamo semplicemente
+                # hw_speech_detected a None per sempre: gli unici
+                # punti che lo leggono (hw_speech_active) lo
+                # trattano come "non disponibile" e non bloccano
+                # mai nulla.
+                # ------------------------------------------------
+
+                if hw_doa is not None and len(hw_doa) >= 2:
+
+                    if not self.hw_speech_seen:
+
+                        self.hw_speech_seen = True
+
+                        print(
+                            "[XVF] DOA_VALUE disponibile: uso "
+                            "anche il flag speech del chip "
+                            "(modulo GPO, resid 20) come filtro "
+                            "aggiuntivo indipendente dall'energia "
+                            "per beam"
+                        )
+
+                    with self.lock:
+                        self.hw_doa_angle = float(hw_doa[0])
+                        self.hw_speech_detected = bool(hw_doa[1])
+
+                elif (
+                    not self.hw_speech_seen
+                    and self.hw_speech_error_count <= 5
+                ):
+
+                    self.hw_speech_error_count += 1
+
+                    if self.hw_speech_error_count == 5:
+
+                        print(
+                            "[XVF] DOA_VALUE non disponibile su "
+                            "questo firmware/device dopo diversi "
+                            "tentativi: il filtro extra sul flag "
+                            "speech resta disattivato (fail-open, "
+                            "nessun impatto sul funzionamento "
+                            "esistente)"
+                        )
+
+                # ------------------------------------------------
                 # DEBUG TELEMETRIA (solo se debug_config.DEBUG_LOGGING attivo)
                 # ------------------------------------------------
 
@@ -753,12 +848,19 @@ class XVF3800Telemetry:
                             for i in range(count)
                         )
 
+                        hw_speech_text = (
+                            "N/D"
+                            if self.hw_speech_detected is None
+                            else str(self.hw_speech_detected)
+                        )
+
                         print(
                             f"[XVF] {beam_text} | "
                             f"DOM=B{dominant} "
                             f"{dominant_angle:.1f}° | "
                             f"2nd={second_energy:.0f} "
-                            f"ratio={ratio:.2f}"
+                            f"ratio={ratio:.2f} | "
+                            f"hw_speech={hw_speech_text}"
                         )
 
             except Exception as e:
@@ -807,9 +909,37 @@ class XVF3800Telemetry:
                 "dominance_ratio":
                     self.dominance_ratio,
 
+                "hw_doa_angle":
+                    self.hw_doa_angle,
+
+                "hw_speech_detected":
+                    self.hw_speech_detected,
+
                 "last_update":
                     self.last_update
             }
+
+    # --------------------------------------------------------
+
+    def hw_speech_active(self):
+        """
+        Flag di voce rilevata letto da DOA_VALUE (modulo GPO/LED
+        del chip, resid 20) — indipendente dall'energia per beam
+        di AEC_SPENERGY_VALUES usata per dominant_energy/
+        dominance_ratio sopra. Se il device/firmware non espone
+        questo parametro (nessuna lettura valida ricevuta finora),
+        ritorna sempre True per non bloccare mai il riconoscimento
+        comandi (fail-open): il comportamento resta identico a
+        prima dell'introduzione di questo filtro.
+        """
+
+        with self.lock:
+            value = self.hw_speech_detected
+
+        if value is None:
+            return True
+
+        return value
 
     # --------------------------------------------------------
 
@@ -1692,9 +1822,21 @@ class WakeWordListener:
             ratio >= SPEECH_START_RATIO
         )
 
+        # Flag "speech" letto da DOA_VALUE (vedi XVF3800Telemetry.
+        # hw_speech_active): un segnale indipendente dall'energia
+        # per beam gia' usata sopra per energy_valid/direction_
+        # active. Se il device/firmware non lo espone, e' sempre
+        # True (fail-open), quindi non cambia nulla rispetto a
+        # prima su un setup dove DOA_VALUE non e' disponibile.
+        hw_speech_ok = (
+            not WAKE_HW_SPEECH_GATE_ENABLED
+            or self.xvf.hw_speech_active()
+        )
+
         if (
             energy_valid
             and direction_active
+            and hw_speech_ok
         ):
 
             if self.speech_start_candidate is None:
@@ -1738,6 +1880,20 @@ class WakeWordListener:
                 )
 
         else:
+
+            if (
+                energy_valid
+                and direction_active
+                and not hw_speech_ok
+                and debug_config.DEBUG_LOGGING
+            ):
+
+                print(
+                    "[SPEECH] Energia e direzione OK ma il chip "
+                    "non rileva voce (DOA_VALUE speech=0): "
+                    "ignorato (probabile musica/rumore dalla "
+                    "stessa direzione)"
+                )
 
             self.speech_start_candidate = None
 
@@ -2210,6 +2366,10 @@ class WakeWordListener:
                 print(
                     f"Dominance   : "
                     f"{DIRECTION_MIN_DOMINANCE}x"
+                )
+                print(
+                    f"HW speech   : "
+                    f"{'on (DOA_VALUE, fail-open se assente)' if WAKE_HW_SPEECH_GATE_ENABLED else 'off'}"
                 )
                 print(
                     f"Post wake   : "
