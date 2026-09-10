@@ -600,6 +600,18 @@ class XVF3800Telemetry:
         # direzione dominante di qualche centinaio di ms prima.
         self.history = collections.deque(maxlen=200)
 
+        # Storico (timestamp, angolo, speech_flag) del segnale
+        # hardware DOA_VALUE/hw_speech_detected (quello che pilota
+        # anche il LED del device). A differenza di self.history
+        # (basata su AEC_SPENERGY_VALUES, cioè "qual è il beam più
+        # energico in assoluto"), questo riflette il giudizio
+        # dedicato del firmware su CHI sta parlando in questo
+        # momento — utile per non farsi rubare il lock direzionale
+        # da una seconda sorgente sonora più forte ma non "vocale"
+        # nel senso riconosciuto dal chip. Vedi recent_hw_speech_
+        # direction() sotto.
+        self.hw_history = collections.deque(maxlen=200)
+
     # --------------------------------------------------------
 
     def start(self):
@@ -861,6 +873,14 @@ class XVF3800Telemetry:
                         self.hw_doa_angle = float(hw_doa[0])
                         self.hw_speech_detected = bool(hw_doa[1])
 
+                        self.hw_history.append(
+                            (
+                                time.monotonic(),
+                                self.hw_doa_angle,
+                                self.hw_speech_detected
+                            )
+                        )
+
                 elif (
                     not self.hw_speech_seen
                     and self.hw_speech_error_count <= 5
@@ -1019,33 +1039,41 @@ class XVF3800Telemetry:
     # --------------------------------------------------------
 
     def matches_direction(self, locked_angle):
+        """
+        Vero se ALMENO UNO dei beam riportati dal device ha
+        energia sufficiente ed è entro tolleranza da locked_angle.
 
-        data = self.snapshot()
+        Prima guardava solo il beam dominante (il più energico in
+        assoluto): con due sorgenti sonore contemporanee (una
+        continua, l'altra la persona agganciata dalla wake word),
+        se la sorgente continua è più forte diventa lei il beam
+        dominante e questo controllo tornava sempre False sulla
+        direzione giusta, anche con la persona che sta ancora
+        parlando — troncando il comando o facendolo scadere in
+        timeout. Scandire TUTTI i beam invece del solo dominante
+        permette di riconoscere che c'è ancora energia vocale
+        nella direzione agganciata anche quando non è la più forte
+        della stanza in quel momento.
+        """
 
-        if data["dominant_angle"] is None:
-            return False
+        with self.lock:
+            azimuths = list(self.azimuths)
+            energies = list(self.energies)
 
-        if (
-            data["dominant_energy"]
-            < DIRECTION_MIN_ENERGY
-        ):
-            return False
+        for angle, energy in zip(azimuths, energies):
 
-        if (
-            data["dominance_ratio"]
-            < DIRECTION_MIN_DOMINANCE
-        ):
-            return False
+            if energy < DIRECTION_MIN_ENERGY:
+                continue
 
-        distance = angle_distance(
-            data["dominant_angle"],
-            locked_angle
-        )
+            distance = angle_distance(
+                angle,
+                locked_angle
+            )
 
-        return (
-            distance
-            <= DIRECTION_ANGLE_TOLERANCE
-        )
+            if distance <= DIRECTION_ANGLE_TOLERANCE:
+                return True
+
+        return False
 
     # --------------------------------------------------------
 
@@ -1086,6 +1114,60 @@ class XVF3800Telemetry:
         )
 
         return best[1]
+
+    # --------------------------------------------------------
+
+    def recent_hw_speech_direction(self, window_seconds):
+        """
+        Come recent_direction(), ma cerca nello storico del flag
+        hardware DOA_VALUE (self.hw_history) invece che in quello
+        basato su AEC_SPENERGY_VALUES (self.history).
+
+        Motivo per cui i due possono dare risposte diverse: con
+        DUE sorgenti sonore contemporanee (es. una parla di
+        continuo, l'altra pronuncia la wake word), recent_
+        direction() sceglie la lettura più ENERGICA nella finestra
+        — che finisce quasi sempre per essere la sorgente continua
+        se è più forte, anche se non è lei ad aver detto la wake
+        word. DOA_VALUE è invece un giudizio dedicato del firmware
+        su CHI sta parlando in questo momento (lo stesso segnale
+        che pilota il LED del device), quindi tra le letture
+        valide preferiamo qui la più RECENTE con speech_flag=True
+        invece della più energica: è la scelta giusta quando le
+        due sorgenti competono, perché resta agganciata a chi ha
+        effettivamente innescato la wake word invece che a chi
+        parla più forte.
+
+        Ritorna l'angolo (float) oppure None se nello storico non
+        c'è nessuna lettura con voce rilevata nella finestra
+        richiesta (es. device/firmware che non espone DOA_VALUE:
+        hw_history resta sempre vuoto, fail-open verso il chiamante
+        che ricade su recent_direction()).
+        """
+
+        now = time.monotonic()
+
+        with self.lock:
+            entries = [
+                entry
+                for entry in self.hw_history
+                if now - entry[0] <= window_seconds
+            ]
+
+        # entry = (timestamp, angle, speech_flag)
+        speech_entries = [
+            entry for entry in entries if entry[2]
+        ]
+
+        if not speech_entries:
+            return None
+
+        most_recent = max(
+            speech_entries,
+            key=lambda entry: entry[0]
+        )
+
+        return most_recent[1]
 
 
 # ============================================================
@@ -2591,11 +2673,34 @@ class WakeWordListener:
                             # senza dover ricostruire un nuovo
                             # lock da zero (che tagliava l'inizio
                             # della frase).
+                            #
+                            # Preferiamo il flag hardware DOA_VALUE
+                            # (stesso segnale che pilota il LED del
+                            # device) a recent_direction(): con due
+                            # sorgenti sonore contemporanee (una
+                            # continua, l'altra che pronuncia la
+                            # wake word), recent_direction() sceglie
+                            # la lettura più energica e finisce per
+                            # agganciarsi alla sorgente continua se
+                            # è più forte — anche se non è lei ad
+                            # aver detto la wake word. Se il device/
+                            # firmware non espone DOA_VALUE,
+                            # recent_hw_speech_direction() ritorna
+                            # sempre None e ricadiamo sul
+                            # comportamento precedente (fail-open).
                             wake_angle = (
-                                self.xvf.recent_direction(
+                                self.xvf.recent_hw_speech_direction(
                                     WAKE_DIRECTION_LOOKBACK_SECONDS
                                 )
                             )
+
+                            if wake_angle is None:
+
+                                wake_angle = (
+                                    self.xvf.recent_direction(
+                                        WAKE_DIRECTION_LOOKBACK_SECONDS
+                                    )
+                                )
 
                             self.locked_direction = wake_angle
 
