@@ -22,3 +22,6 @@ simpleaudio
 
 # Voice Activity Detection
 webrtcvad
+
+# MQTT: notifica di fine timer da Home Assistant
+paho-mqtt

@@ -33,8 +33,7 @@ SYNONYMS_FILE = ""
 
 HA_URL = ""
 HA_TOKEN = ""
-
-TIMER_SERVICE_URL = "http://127.0.0.1:8090"
+HA_SERVICES_URL = ""
 
 AZIONI = []
 ENTITA = []
@@ -47,15 +46,41 @@ AZIONE_SYNONYMS = {}
 # ============================================================
 # CONFIGURAZIONE TIMER VOCALE
 # ============================================================
+#
+# I timer sono gestiti da Home Assistant (dominio "timer"), non
+# da KeyVoice: qui c'è solo un pool di entità HA predefinite
+# (timer.keyvoice_1 .. timer.keyvoice_N, vedi ha/) tra cui
+# scegliere uno slot libero all'avvio. Il nome pronunciato
+# (es. "torta") NON esiste in HA: viene tenuto solo qui, in
+# memoria, associato allo slot occupato, solo per sapere cosa
+# annunciare/loggare alla notifica di fine timer via MQTT.
 
-# Parole che indicano una richiesta di cancellazione del
-# timer attivo. Devono comparire insieme alla parola "timer"
-# nella frase riconosciuta.
+TIMER_ENTITY_PREFIX = "timer.keyvoice_"
+TIMER_POOL_SIZE = 5
+
+TIMER_ENTITIES = [
+    f"{TIMER_ENTITY_PREFIX}{indice}"
+    for indice in range(1, TIMER_POOL_SIZE + 1)
+]
+
+# Parole che indicano una richiesta di cancellazione di un
+# timer. Devono comparire insieme alla parola "timer" nella
+# frase riconosciuta.
 TIMER_CANCELLA_KEYWORDS = {
     "cancella",
     "ferma",
     "annulla",
     "stop",
+}
+
+# Parola chiave opzionale che introduce esplicitamente il nome:
+# "crea un timer chiamato torta di dieci minuti".
+TIMER_NOME_KEYWORD = "chiamato"
+
+# Parole di raccordo da scartare se catturate per errore come
+# parte del nome (es. articoli prima di "timer").
+TIMER_PAROLE_DA_IGNORARE = {
+    "un", "uno", "una", "il", "lo", "la", "i", "gli", "le",
 }
 
 TIMER_UNITA_SECONDI = {
@@ -65,9 +90,10 @@ TIMER_UNITA_SECONDI = {
     "ore": 3600,
 }
 
-# Un solo timer vocale attivo alla volta: id dell'ultimo
-# timer creato, usato dal comando di cancellazione.
-_active_timer_id = None
+# Slot occupati: entity_id -> nome pronunciato (può essere
+# None se il timer è stato avviato senza nome).
+_timer_slots = {}
+_timer_slots_lock = threading.Lock()
 
 
 # ============================================================
@@ -380,7 +406,7 @@ def init_fuzzy(config: dict):
     global SYNONYMS_FILE
     global HA_URL
     global HA_TOKEN
-    global TIMER_SERVICE_URL
+    global HA_SERVICES_URL
     global AZIONI
 
     config_path = config[
@@ -408,13 +434,10 @@ def init_fuzzy(config: dict):
         "token"
     ]
 
-    TIMER_SERVICE_URL = config.get(
-        "timer_service",
-        {}
-    ).get(
-        "url",
-        TIMER_SERVICE_URL
-    ).rstrip("/")
+    HA_SERVICES_URL = (
+        f"{config['homeassistant']['url'].rstrip('/')}"
+        "/api/services"
+    )
 
     AZIONI = config.get(
         "azioni",
@@ -735,16 +758,23 @@ def trova_stanza(
 # RICONOSCIMENTO COMANDO TIMER
 # ============================================================
 
-def estrai_durata(
-    frase_norm: str
+TIMER_CONNETTORI_FINALI = {
+    "di", "per", "da",
+}
+
+
+def _trova_durata_con_indice(
+    parole
 ):
     """
-    Cerca nella frase la coppia "<numero> <unità>"
-    (es. "dieci minuti", "un ora") e restituisce la durata
-    in secondi, oppure None se non trovata.
-    """
+    Cerca la coppia "<numero> <unità>" (es. "dieci minuti").
 
-    parole = frase_norm.split()
+    Restituisce (durata_secondi, indice_numero), oppure
+    (None, None) se non trovata. indice_numero è la posizione
+    della parola-numero nella lista, usata da
+    estrai_nome_timer() per capire dove finisce il nome e
+    inizia la durata.
+    """
 
     for indice, parola in enumerate(parole):
 
@@ -761,9 +791,82 @@ def estrai_durata(
         )
 
         if numero:
-            return numero * TIMER_UNITA_SECONDI[parola]
+            return (
+                numero * TIMER_UNITA_SECONDI[parola],
+                indice - 1
+            )
 
-    return None
+    return None, None
+
+
+def estrai_durata(
+    frase_norm: str
+):
+    durata, _ = _trova_durata_con_indice(
+        frase_norm.split()
+    )
+
+    return durata
+
+
+def estrai_nome_timer(
+    frase_norm: str,
+    indice_numero=None
+):
+    """
+    Estrae il nome libero del timer: tutto ciò che sta tra
+    "timer" (o "timer chiamato") e l'inizio della durata
+    (es. "crea un timer torta di dieci minuti" -> "torta").
+
+    Nessun elenco chiuso di nomi: qualunque parola pronunciata
+    in quella posizione viene presa così com'è (per questo la
+    frase deve arrivare dalla passata di dettatura libera, non
+    dalla grammatica chiusa — vedi vosk_listener.py).
+
+    Restituisce None se non c'è nulla in quella posizione.
+    """
+
+    parole = frase_norm.split()
+
+    if "timer" not in parole:
+        return None
+
+    indice_timer = parole.index(
+        "timer"
+    )
+
+    if indice_numero is None:
+        _, indice_numero = _trova_durata_con_indice(
+            parole
+        )
+
+    fine = (
+        indice_numero
+        if indice_numero is not None
+        else len(parole)
+    )
+
+    segmento = parole[
+        indice_timer + 1: fine
+    ]
+
+    if (
+        segmento
+        and segmento[0] == TIMER_NOME_KEYWORD
+    ):
+        segmento = segmento[1:]
+
+    segmento = [
+        parola
+        for parola in segmento
+        if parola not in TIMER_PAROLE_DA_IGNORARE
+        and parola not in TIMER_CONNETTORI_FINALI
+    ]
+
+    if not segmento:
+        return None
+
+    return " ".join(segmento)
 
 
 def rileva_comando_timer(
@@ -772,9 +875,10 @@ def rileva_comando_timer(
     """
     Riconosce un comando timer nella frase già normalizzata.
 
-    Restituisce una tupla (tipo, durata_secondi):
-      - ("avvia", durata) se viene richiesto un nuovo timer
-      - ("cancella", None) se viene richiesta la cancellazione
+    Restituisce una tupla (tipo, durata_secondi, nome):
+      - ("avvia", durata, nome) per un nuovo timer
+      - ("cancella", None, nome) per una cancellazione
+        (nome è None se non specificato)
 
     Restituisce None se la frase non è un comando timer.
     """
@@ -785,14 +889,26 @@ def rileva_comando_timer(
         return None
 
     if TIMER_CANCELLA_KEYWORDS & set(parole):
-        return ("cancella", None)
 
-    durata = estrai_durata(
-        frase_norm
+        nome = estrai_nome_timer(
+            frase_norm,
+            indice_numero=len(parole)
+        )
+
+        return ("cancella", None, nome)
+
+    durata, indice_numero = _trova_durata_con_indice(
+        parole
     )
 
     if durata:
-        return ("avvia", durata)
+
+        nome = estrai_nome_timer(
+            frase_norm,
+            indice_numero=indice_numero
+        )
+
+        return ("avvia", durata, nome)
 
     return None
 
@@ -906,18 +1022,19 @@ def processa_comandi():
             )
 
             if timer_cmd:
-                tipo, durata = timer_cmd
+                tipo, durata, nome = timer_cmd
 
                 print(
                     "[COMANDI] Comando timer riconosciuto: "
-                    f"{tipo} {durata}"
+                    f"{tipo} durata={durata} nome={nome}"
                 )
 
                 if profile != "test":
                     timer_command_queue.put(
                         {
                             "tipo": tipo,
-                            "durata": durata
+                            "durata": durata,
+                            "nome": nome
                         }
                     )
 
@@ -1041,12 +1158,139 @@ def ha_command_consumer():
 
 
 # ============================================================
-# THREAD TIMER SERVICE
+# TIMER: POOL SLOT HOME ASSISTANT
+# ============================================================
+
+def _formatta_durata(
+    secondi: int
+) -> str:
+    ore, resto = divmod(
+        int(secondi),
+        3600
+    )
+
+    minuti, sec = divmod(
+        resto,
+        60
+    )
+
+    return (
+        f"{ore:02d}:{minuti:02d}:{sec:02d}"
+    )
+
+
+def _trova_slot_libero():
+    with _timer_slots_lock:
+        for entity_id in TIMER_ENTITIES:
+            if entity_id not in _timer_slots:
+                return entity_id
+
+    return None
+
+
+def _trova_slot_per_nome(
+    nome: str
+):
+    with _timer_slots_lock:
+        for entity_id, nome_slot in _timer_slots.items():
+            if nome_slot and nome_slot == nome:
+                return entity_id
+
+    return None
+
+
+def _slot_occupati():
+    with _timer_slots_lock:
+        return dict(_timer_slots)
+
+
+def gestisci_timer_finito(
+    entity_id: str
+):
+    """
+    Chiamata dal listener MQTT (timer_mqtt.py) quando arriva
+    la notifica di fine timer pubblicata dall'automazione HA
+    su keyvoice/timer/finished.
+    """
+
+    with _timer_slots_lock:
+        nome = _timer_slots.pop(
+            entity_id,
+            None
+        )
+
+    print(
+        "[TIMER] Timer terminato: "
+        f"{entity_id} "
+        f"(nome={nome})"
+    )
+
+    sound_feedback.play_command_ok()
+
+
+# ============================================================
+# TIMER: CHIAMATE HOME ASSISTANT
+# ============================================================
+
+def _ha_timer_start(
+    entity_id: str,
+    durata_secondi: int
+) -> bool:
+    risposta = requests.post(
+        f"{HA_SERVICES_URL}/timer/start",
+        headers={
+            "Authorization": f"Bearer {HA_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "entity_id": entity_id,
+            "duration": _formatta_durata(
+                durata_secondi
+            ),
+        },
+        timeout=5,
+    )
+
+    if not risposta.ok:
+        print(
+            "[TIMER] Errore avvio timer HA: "
+            f"{risposta.status_code} "
+            f"{risposta.text}"
+        )
+
+    return risposta.ok
+
+
+def _ha_timer_cancel(
+    entity_id: str
+) -> bool:
+    risposta = requests.post(
+        f"{HA_SERVICES_URL}/timer/cancel",
+        headers={
+            "Authorization": f"Bearer {HA_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "entity_id": entity_id,
+        },
+        timeout=5,
+    )
+
+    if not risposta.ok:
+        print(
+            "[TIMER] Errore cancellazione timer HA: "
+            f"{risposta.status_code} "
+            f"{risposta.text}"
+        )
+
+    return risposta.ok
+
+
+# ============================================================
+# THREAD TIMER
 # ============================================================
 
 def timer_command_consumer():
-    global _active_timer_id
-
     print(
         "[TIMER] Thread consumer avviato"
     )
@@ -1063,75 +1307,111 @@ def timer_command_consumer():
         try:
             if comando["tipo"] == "avvia":
 
-                risposta = requests.post(
-                    f"{TIMER_SERVICE_URL}/timers",
-                    json={
-                        "duration": comando["durata"]
-                    },
-                    timeout=5,
-                )
+                entity_id = _trova_slot_libero()
 
-                if risposta.ok:
-                    _active_timer_id = risposta.json()["id"]
-
+                if not entity_id:
                     print(
-                        "[TIMER] Timer avviato: "
-                        f"{_active_timer_id} "
-                        f"({comando['durata']}s)"
-                    )
-
-                    sound_feedback.play_command_ok()
-
-                else:
-                    print(
-                        "[TIMER] Errore avvio timer: "
-                        f"{risposta.status_code} "
-                        f"{risposta.text}"
-                    )
-
-                    sound_feedback.play_command_error()
-
-            elif comando["tipo"] == "cancella":
-
-                if not _active_timer_id:
-                    print(
-                        "[TIMER] Nessun timer attivo "
-                        "da cancellare"
+                        "[TIMER] Pool esaurito: "
+                        f"{TIMER_POOL_SIZE} timer già attivi"
                     )
 
                     sound_feedback.play_command_error()
 
                 else:
-                    risposta = requests.post(
-                        f"{TIMER_SERVICE_URL}/timers/"
-                        f"{_active_timer_id}/cancel",
-                        timeout=5,
+                    ok = _ha_timer_start(
+                        entity_id,
+                        comando["durata"]
                     )
 
-                    if risposta.ok:
+                    if ok:
+                        with _timer_slots_lock:
+                            _timer_slots[entity_id] = (
+                                comando["nome"]
+                            )
+
                         print(
-                            "[TIMER] Timer cancellato: "
-                            f"{_active_timer_id}"
+                            "[TIMER] Timer avviato: "
+                            f"{entity_id} "
+                            f"nome={comando['nome']} "
+                            f"({comando['durata']}s)"
                         )
 
                         sound_feedback.play_command_ok()
 
-                        _active_timer_id = None
+                    else:
+                        sound_feedback.play_command_error()
+
+            elif comando["tipo"] == "cancella":
+
+                nome = comando["nome"]
+
+                if nome:
+                    entity_id = _trova_slot_per_nome(
+                        nome
+                    )
+
+                    if not entity_id:
+                        print(
+                            "[TIMER] Nessun timer attivo "
+                            f"chiamato '{nome}'"
+                        )
+
+                        sound_feedback.play_command_error()
+                        entity_id = None
+
+                else:
+                    occupati = _slot_occupati()
+
+                    if len(occupati) == 1:
+                        entity_id = next(
+                            iter(occupati)
+                        )
+
+                    elif len(occupati) == 0:
+                        print(
+                            "[TIMER] Nessun timer attivo "
+                            "da cancellare"
+                        )
+
+                        sound_feedback.play_command_error()
+                        entity_id = None
 
                     else:
                         print(
-                            "[TIMER] Errore cancellazione "
-                            "timer: "
-                            f"{risposta.status_code} "
-                            f"{risposta.text}"
+                            "[TIMER] Più timer attivi "
+                            f"({list(occupati.values())}), "
+                            "specifica il nome per cancellare"
                         )
 
+                        sound_feedback.play_command_error()
+                        entity_id = None
+
+                if entity_id:
+                    ok = _ha_timer_cancel(
+                        entity_id
+                    )
+
+                    if ok:
+                        with _timer_slots_lock:
+                            _timer_slots.pop(
+                                entity_id,
+                                None
+                            )
+
+                        print(
+                            "[TIMER] Timer cancellato: "
+                            f"{entity_id}"
+                        )
+
+                        sound_feedback.play_command_ok()
+
+                    else:
                         sound_feedback.play_command_error()
 
         except Exception as exc:
             print(
                 "[TIMER] Errore comunicazione con "
-                f"timer_service: {exc}"
+                f"Home Assistant: {exc}"
             )
 
             traceback.print_exc()

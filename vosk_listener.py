@@ -550,6 +550,29 @@ def create_recognizer(
     return recognizer
 
 
+def create_free_recognizer(
+    model
+):
+    """
+    Recognizer SENZA grammatica (dettatura libera).
+
+    La grammatica chiusa non può in nessun caso restituire
+    una parola che non è già stata elencata: qualsiasi parola
+    fuori vocabolario diventa [unk], senza modo di recuperarne
+    il testo. Per il nome libero del timer ("crea un timer
+    torta di dieci minuti") serve quindi una seconda passata
+    di dettatura libera sullo stesso audio, usata SOLO quando
+    la prima passata (grammatica) fallisce o contiene la
+    parola "timer" — per le altre frasi (domotica) resta tutto
+    invariato, sulla passata a grammatica chiusa più accurata.
+    """
+
+    return vosk.KaldiRecognizer(
+        model,
+        VOSK_SAMPLE_RATE
+    )
+
+
 # ============================================================
 # PARSING RISULTATO
 # ============================================================
@@ -702,6 +725,26 @@ def vosk_listener(
     )
 
     # ========================================================
+    # RECOGNIZER LIBERO (fallback nome timer)
+    # ========================================================
+
+    try:
+
+        free_recognizer = create_free_recognizer(
+            model
+        )
+
+    except Exception as exc:
+
+        print(
+            "[VOLK] "
+            "ERRORE creazione recognizer libero: "
+            f"{exc}"
+        )
+
+        return
+
+    # ========================================================
     # READY
     # ========================================================
 
@@ -836,36 +879,71 @@ def vosk_listener(
                 continue
 
             # =================================================
-            # UNKNOWN
+            # FALLBACK DETTATURA LIBERA (nome timer)
             # =================================================
+            #
+            # Attivato quando la grammatica chiusa non ha
+            # riconosciuto nulla di utile (tutto [unk]) oppure
+            # quando la parola "timer" compare comunque nel
+            # risultato: in entrambi i casi il nome libero del
+            # timer, se presente, è andato perso come [unk] e va
+            # recuperato con una seconda passata senza grammatica
+            # sullo stesso audio.
 
-            if text == UNKNOWN_TOKEN:
+            necessita_fallback = (
+                text == UNKNOWN_TOKEN
+                or UNKNOWN_TOKEN in text
+                or "timer" in text.split()
+            )
 
-                print(
-                    "[VOLK] "
-                    "Audio fuori grammatica "
-                    f"[decode: "
-                    f"{elapsed:.3f}s]"
+            if necessita_fallback:
+
+                free_recognizer.Reset()
+
+                free_recognizer.AcceptWaveform(
+                    pcm_bytes
                 )
 
-                continue
-
-            # Vosk può produrre [unk] insieme ad altre parole.
-            if UNKNOWN_TOKEN in text:
-
-                print(
-                    "[VOLK] "
-                    "Comando parzialmente sconosciuto: "
-                    f"{text}"
+                free_text = get_final_text(
+                    free_recognizer
                 )
 
-                text = text.replace(
-                    UNKNOWN_TOKEN,
-                    ""
-                ).strip()
+                if "timer" in free_text.split():
 
-                if not text:
+                    print(
+                        "[VOLK] "
+                        "Fallback dettatura libera (timer): "
+                        f"{free_text}"
+                    )
+
+                    text = free_text
+
+                elif text == UNKNOWN_TOKEN:
+
+                    print(
+                        "[VOLK] "
+                        "Audio fuori grammatica "
+                        f"[decode: "
+                        f"{elapsed:.3f}s]"
+                    )
+
                     continue
+
+                elif UNKNOWN_TOKEN in text:
+
+                    print(
+                        "[VOLK] "
+                        "Comando parzialmente sconosciuto: "
+                        f"{text}"
+                    )
+
+                    text = text.replace(
+                        UNKNOWN_TOKEN,
+                        ""
+                    ).strip()
+
+                    if not text:
+                        continue
 
             # =================================================
             # FINAL COMMAND

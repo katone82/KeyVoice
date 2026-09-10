@@ -10,7 +10,8 @@ import debug_config
 import sound_feedback
 from vosk_listener import vosk_listener
 from xvf3800_wakeword_listener import WakeWordListener, apply_config
-from fuzzy_parser import init_fuzzy, processa_comandi, command_queue, stop_event, timer_command_consumer
+from fuzzy_parser import init_fuzzy, processa_comandi, command_queue, stop_event, timer_command_consumer, gestisci_timer_finito
+from timer_mqtt import avvia_listener_timer_mqtt
 
 # ==============================
 # CARICA CONFIGURAZIONE ESTERNA
@@ -143,6 +144,15 @@ t_wakeword.start()
 t_fuzzy.start()
 t_ha.start()
 t_timer.start()
+
+# Ascolto MQTT della notifica di fine timer pubblicata
+# dall'automazione HA (vedi ha/keyvoice_timer_automation.yaml).
+# Non è un thread separato: il client paho-mqtt gestisce da
+# solo il proprio loop in background (client.loop_start()).
+timer_mqtt_client = avvia_listener_timer_mqtt(
+    CONFIG,
+    on_finished=gestisci_timer_finito
+)
 
 # ==============================
 # Attesa componenti davvero pronti
