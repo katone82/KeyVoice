@@ -1,0 +1,25 @@
+# Notifica a KeyVoice quando un timer.keyvoice_N termina, cosi'
+# KeyVoice puo' dare il feedback sonoro (vedi timer_mqtt.py /
+# gestisci_timer_finito() in fuzzy_parser.py, in ascolto sul
+# topic keyvoice/timer/finished).
+#
+# Da aggiungere in Impostazioni > Automazioni > Modifica in YAML
+# (oppure incollare in automations.yaml).
+
+alias: KeyVoice - notifica fine timer
+description: >
+  Pubblica su MQTT quando un timer.keyvoice_N termina.
+trigger:
+  - platform: event
+    event_type: timer.finished
+condition:
+  - condition: template
+    value_template: >
+      {{ trigger.event.data.entity_id.startswith('timer.keyvoice_') }}
+action:
+  - service: mqtt.publish
+    data:
+      topic: keyvoice/timer/finished
+      payload: >
+        {"entity_id": "{{ trigger.event.data.entity_id }}"}
+mode: parallel

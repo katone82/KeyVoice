@@ -1,0 +1,27 @@
+# Entità timer che KeyVoice usa come pool per i timer vocali
+# (vedi TIMER_ENTITIES in fuzzy_parser.py: timer.keyvoice_1 ..
+# timer.keyvoice_5). Il countdown vive qui in Home Assistant,
+# non su KeyVoice.
+#
+# Da aggiungere in configuration.yaml, ad es. incollando queste
+# righe sotto una chiave "timer:" esistente, oppure:
+#
+#   timer: !include ha/keyvoice_timer_helpers.yaml
+#
+# Dopo la modifica: Impostazioni > Sistema > Riavvia (o
+# Controlla configurazione + ricarica YAML dei timer helper).
+
+keyvoice_1:
+  name: KeyVoice Timer 1
+
+keyvoice_2:
+  name: KeyVoice Timer 2
+
+keyvoice_3:
+  name: KeyVoice Timer 3
+
+keyvoice_4:
+  name: KeyVoice Timer 4
+
+keyvoice_5:
+  name: KeyVoice Timer 5
