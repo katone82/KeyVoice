@@ -2548,6 +2548,32 @@ class WakeWordListener:
 
                             self.wake_confirm_count = 0
 
+                            # check_wakeword() non viene più
+                            # chiamato per tutta la durata di
+                            # WAIT_COMMAND/RECORDING (anche
+                            # diversi secondi): i campioni non
+                            # ancora raggruppati in un chunk da
+                            # 80ms restano fermi qui. Senza questo
+                            # reset, al ritorno in LISTENING
+                            # verrebbero incollati a campioni
+                            # freschi arrivati secondi dopo,
+                            # creando una cucitura innaturale che
+                            # il modello elabora come audio
+                            # continuo e può produrre uno score
+                            # fasullo sul primo chunk dopo la
+                            # ripresa. last_wake_score va azzerato
+                            # per lo stesso motivo: altrimenti il
+                            # log [WAKE-DEBUG] può mostrare, alla
+                            # ripresa, il punteggio "congelato"
+                            # dell'ultimo chunk visto PRIMA di
+                            # questa wake word, non un valore
+                            # realmente aggiornato.
+                            self.wake_buffer = np.zeros(
+                                0, dtype=np.int16
+                            )
+
+                            self.last_wake_score = 0.0
+
                             # Catturiamo subito la direzione da
                             # cui è arrivata la wake word stessa:
                             # il comando verrà accettato solo se
