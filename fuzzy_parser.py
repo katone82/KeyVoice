@@ -64,13 +64,15 @@ TIMER_ENTITIES = [
 ]
 
 # Parole che indicano una richiesta di cancellazione di un
-# timer. Devono comparire insieme alla parola "timer" nella
-# frase riconosciuta.
+# timer attivo E/O di spegnimento della suoneria di un timer
+# già scaduto. Devono comparire insieme alla parola "timer"
+# nella frase riconosciuta.
 TIMER_CANCELLA_KEYWORDS = {
     "cancella",
     "ferma",
     "annulla",
     "stop",
+    "spegni",
 }
 
 # Parola chiave opzionale che introduce esplicitamente il nome:
@@ -1211,6 +1213,12 @@ def gestisci_timer_finito(
     Chiamata dal listener MQTT (timer_mqtt.py) quando arriva
     la notifica di fine timer pubblicata dall'automazione HA
     su keyvoice/timer/finished.
+
+    Avvia la suoneria in loop (sound_feedback.play_timer_alarm):
+    resta attiva finché non arriva un comando vocale
+    "cancella"/"ferma"/"spegni timer" (vedi timer_command_consumer,
+    ramo "cancella"). Se scadono più timer vicini nel tempo, la
+    suoneria resta comunque una sola.
     """
 
     with _timer_slots_lock:
@@ -1225,7 +1233,7 @@ def gestisci_timer_finito(
         f"(nome={nome})"
     )
 
-    sound_feedback.play_command_ok()
+    sound_feedback.play_timer_alarm()
 
 
 # ============================================================
@@ -1343,21 +1351,38 @@ def timer_command_consumer():
 
             elif comando["tipo"] == "cancella":
 
+                # "cancella"/"ferma"/"annulla"/"stop"/"spegni
+                # timer" spengono SEMPRE prima la suoneria di un
+                # timer già scaduto (se ce n'è una in corso, una
+                # sola indipendentemente da quanti timer sono
+                # scaduti, dato che l'allarme è unico e globale).
+                # Poi, se richiesto, si cerca anche un countdown
+                # ancora attivo da cancellare su HA.
+                allarme_spento = (
+                    sound_feedback.stop_timer_alarm()
+                )
+
+                if allarme_spento:
+                    print(
+                        "[TIMER] Suoneria fine timer spenta"
+                    )
+
                 nome = comando["nome"]
+                entity_id = None
+                errore_ricerca = False
 
                 if nome:
                     entity_id = _trova_slot_per_nome(
                         nome
                     )
 
-                    if not entity_id:
+                    if not entity_id and not allarme_spento:
                         print(
                             "[TIMER] Nessun timer attivo "
                             f"chiamato '{nome}'"
                         )
 
-                        sound_feedback.play_command_error()
-                        entity_id = None
+                        errore_ricerca = True
 
                 else:
                     occupati = _slot_occupati()
@@ -1368,13 +1393,13 @@ def timer_command_consumer():
                         )
 
                     elif len(occupati) == 0:
-                        print(
-                            "[TIMER] Nessun timer attivo "
-                            "da cancellare"
-                        )
+                        if not allarme_spento:
+                            print(
+                                "[TIMER] Nessun timer attivo "
+                                "da cancellare"
+                            )
 
-                        sound_feedback.play_command_error()
-                        entity_id = None
+                            errore_ricerca = True
 
                     else:
                         print(
@@ -1383,8 +1408,7 @@ def timer_command_consumer():
                             "specifica il nome per cancellare"
                         )
 
-                        sound_feedback.play_command_error()
-                        entity_id = None
+                        errore_ricerca = True
 
                 if entity_id:
                     ok = _ha_timer_cancel(
@@ -1407,6 +1431,12 @@ def timer_command_consumer():
 
                     else:
                         sound_feedback.play_command_error()
+
+                elif errore_ricerca:
+                    sound_feedback.play_command_error()
+
+                elif allarme_spento:
+                    sound_feedback.play_command_ok()
 
         except Exception as exc:
             print(

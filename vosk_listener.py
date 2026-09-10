@@ -55,6 +55,8 @@ TIMER_CANCELLA_FRASI = [
     "ferma il timer",
     "annulla timer",
     "stop timer",
+    "spegni timer",
+    "spegni il timer",
 ]
 
 TIMER_MAX_MINUTI = 60

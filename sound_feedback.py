@@ -41,6 +41,10 @@ COMMAND_ERROR_FILE = os.path.join(
     SCRIPT_DIR, "sounds", "command_error.wav"
 )
 
+TIMER_ALARM_FILE = os.path.join(
+    SCRIPT_DIR, "sounds", "timer_finished.wav"
+)
+
 # Stessa scheda ALSA del beep di wake word (BEEP_DEVICE in
 # xvf3800_wakeword_listener.py). Se cambi scheda audio, aggiorna
 # anche qui oppure sovrascrivi da config.json (vedi apply_config
@@ -71,6 +75,7 @@ def apply_config(cfg):
     """
 
     global COMMAND_OK_FILE, COMMAND_ERROR_FILE
+    global TIMER_ALARM_FILE
     global COMMAND_SOUND_DEVICE, COMMAND_FEEDBACK_ENABLED
 
     if not cfg:
@@ -101,9 +106,15 @@ def apply_config(cfg):
     if error_override:
         COMMAND_ERROR_FILE = _resolve(error_override)
 
+    alarm_override = cfg.get("timer_alarm_file")
+
+    if alarm_override:
+        TIMER_ALARM_FILE = _resolve(alarm_override)
+
     for label, path in (
         ("ok_file", COMMAND_OK_FILE),
         ("error_file", COMMAND_ERROR_FILE),
+        ("timer_alarm_file", TIMER_ALARM_FILE),
     ):
         if not os.path.isfile(path):
             print(
@@ -197,3 +208,111 @@ def play_command_error() -> None:
     oppure riconosciuto ma fallito lato Home Assistant.
     """
     _play_sequence([COMMAND_ERROR_FILE], "command_error")
+
+
+# ============================================================
+# SUONERIA FINE TIMER (loop finché non arriva lo stop)
+# ============================================================
+#
+# A differenza di play_command_ok/error (un suono e via), la
+# fine di un timer deve restare udibile finché l'utente non
+# dice "spegni timer" — altrimenti un trillo di 1-2 secondi si
+# perde facilmente. TIMER_ALARM_FILE viene quindi rimandato in
+# loop da un thread dedicato, interrotto da stop_timer_alarm()
+# (fuzzy_parser.py, timer_command_consumer(), comando
+# "cancella"/"spegni").
+
+_alarm_thread = None
+_alarm_process = None
+_alarm_stop_event = threading.Event()
+_alarm_lock = threading.Lock()
+
+
+def play_timer_alarm() -> None:
+    """
+    Avvia la suoneria di fine timer in loop. Se è già in
+    riproduzione (es. più timer scaduti quasi insieme), non fa
+    nulla: resta un solo loop attivo.
+    """
+
+    global _alarm_thread
+
+    if not COMMAND_FEEDBACK_ENABLED:
+        return
+
+    with _alarm_lock:
+        if _alarm_thread is not None and _alarm_thread.is_alive():
+            return
+
+        _alarm_stop_event.clear()
+
+        _alarm_thread = threading.Thread(
+            target=_run_alarm_loop, daemon=True
+        )
+        _alarm_thread.start()
+
+
+def stop_timer_alarm() -> bool:
+    """
+    Ferma subito la suoneria di fine timer, se in corso
+    (termina anche la riproduzione aplay già avviata, non
+    aspetta la fine del file). Restituisce True se ha
+    effettivamente fermato qualcosa, False se non stava
+    suonando nulla — usato da fuzzy_parser.py per distinguere
+    "suoneria spenta" da "nessun timer da cancellare".
+    """
+
+    with _alarm_lock:
+        era_attiva = (
+            _alarm_thread is not None
+            and _alarm_thread.is_alive()
+        )
+
+        _alarm_stop_event.set()
+
+        if _alarm_process is not None:
+            try:
+                _alarm_process.terminate()
+            except Exception:
+                pass
+
+    return era_attiva
+
+
+def _run_alarm_loop() -> None:
+    global _alarm_process
+
+    if not os.path.isfile(TIMER_ALARM_FILE):
+        print(
+            "[SOUND] File non trovato (timer_alarm): "
+            f"{TIMER_ALARM_FILE}"
+        )
+        return
+
+    while not _alarm_stop_event.is_set():
+        try:
+            with _alarm_lock:
+                if _alarm_stop_event.is_set():
+                    return
+
+                _alarm_process = subprocess.Popen(
+                    [
+                        "aplay",
+                        "-q",
+                        "-D",
+                        COMMAND_SOUND_DEVICE,
+                        TIMER_ALARM_FILE,
+                    ],
+                )
+
+            _alarm_process.wait()
+
+        except Exception as exc:
+            print(
+                f"[SOUND] Errore riproduzione timer_alarm: {exc}"
+            )
+            return
+
+        finally:
+            with _alarm_lock:
+                _alarm_process = None
