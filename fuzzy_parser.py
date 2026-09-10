@@ -9,6 +9,8 @@ import unicodedata
 import requests
 from rapidfuzz import process
 
+import sound_feedback
+
 
 # ============================================================
 # CODE CONDIVISE
@@ -839,6 +841,8 @@ def processa_comandi():
                 print(
                     f"[COMANDI] {frase}"
                 )
+
+                sound_feedback.play_command_error()
 
         except Exception as exc:
             print(

@@ -5,6 +5,8 @@ import threading
 import requests
 import time
 
+import sound_feedback
+
 def invia_comando_ha(cmd, ha_url=None, ha_token=None):
     """
     Invia il comando a Home Assistant tramite REST API.
@@ -28,12 +30,16 @@ def invia_comando_ha(cmd, ha_url=None, ha_token=None):
             resp = requests.post(url, headers=headers, json=data, timeout=5)
             if resp.ok:
                 print(f"[HA] Comando inviato: {cmd['azione']} {cmd['entity_id']} -> OK")
+                sound_feedback.play_command_ok()
             else:
                 print(f"[HA] Errore risposta: {resp.status_code} {resp.text}")
+                sound_feedback.play_command_error()
         except Exception as e:
             print(f"[HA] Errore invio comando: {e}")
+            sound_feedback.play_command_error()
     else:
         print(f"[HA] Comando non gestito: {cmd}")
+        sound_feedback.play_command_error()
 
 def ha_command_consumer(ha_url=None, ha_token=None):
     from fuzzy_parser import ha_command_queue, stop_event

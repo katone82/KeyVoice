@@ -7,6 +7,7 @@ import os
 import sys
 
 import debug_config
+import sound_feedback
 from vosk_listener import vosk_listener
 from xvf3800_wakeword_listener import WakeWordListener, apply_config
 from fuzzy_parser import init_fuzzy, processa_comandi, command_queue, stop_event
@@ -40,6 +41,11 @@ debug_config.DEBUG_LOGGING = CONFIG.get("debug_logging", False)
 # apply_config() in xvf3800_wakeword_listener.py per l'elenco
 # completo delle chiavi supportate.
 apply_config(CONFIG.get("openwakeword", {}))
+
+# Suoni di conferma comando (fatto/non fatto), sezione opzionale
+# "command_feedback" di config.json. Vedi la docstring di
+# sound_feedback.apply_config() per le chiavi supportate.
+sound_feedback.apply_config(CONFIG.get("command_feedback", {}))
 
 # ==============================
 # Coda audio e segnali di pronto
@@ -99,12 +105,16 @@ def invia_comando_ha(cmd, ha_url, ha_token):
             resp = requests.post(url, headers=headers, json=data, timeout=5)
             if resp.ok:
                 print(f"[HA] Comando inviato: {cmd['azione']} {cmd['entity_id']} -> OK")
+                sound_feedback.play_command_ok()
             else:
                 print(f"[HA] Errore risposta: {resp.status_code} {resp.text}")
+                sound_feedback.play_command_error()
         except Exception as e:
             print(f"[HA] Errore invio comando: {e}")
+            sound_feedback.play_command_error()
     else:
         print(f"[HA] Comando non gestito: {cmd}")
+        sound_feedback.play_command_error()
 
 def ha_command_consumer(ha_url, ha_token):
     from fuzzy_parser import ha_command_queue, stop_event
