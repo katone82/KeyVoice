@@ -2083,9 +2083,21 @@ class WakeWordListener:
 
         self.last_wake_text = text
 
+        # Trigger SOLO sul risultato FINALE (got_final, cioè dopo
+        # che Vosk stesso ha rilevato una pausa e ha chiuso
+        # l'utterance) con corrispondenza ESATTA, non sui parziali
+        # "in corso" e non con un semplice "contiene". I parziali
+        # sono ipotesi instabili che si aggiornano mentre l'audio
+        # arriva: su parlato/rumore continuo (non solo sul vero
+        # "hey jarvis") la grammatica chiusa — che deve comunque
+        # scegliere tra "è la frase attesa" o "[unk]", senza una
+        # vera opzione di rifiuto — può risolversi verso la frase
+        # attesa anche a metà di un'ipotesi poi corretta nel
+        # risultato finale. Il risultato finale è più stabile e
+        # riduce (non azzera) questo rischio.
         detected = (
-            bool(text)
-            and self.vosk_wake_phrase in text
+            got_final
+            and text.strip() == self.vosk_wake_phrase
         )
 
         self.last_wake_score = 1.0 if detected else 0.0
