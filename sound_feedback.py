@@ -46,6 +46,13 @@ TIMER_ALARM_FILE = os.path.join(
     SCRIPT_DIR, "sounds", "timer_finished.wav"
 )
 
+# Pausa di silenzio (secondi) tra un trillo e l'altro della
+# suoneria di fine timer — vedi _run_alarm_loop(). Deve essere
+# abbastanza lunga da dare al wake word listener una finestra
+# pulita per sentire "spegni timer" nonostante il rumore residuo/
+# riverbero del trillo appena finito.
+TIMER_ALARM_GAP_SECONDS = 2.0
+
 # Stessa scheda ALSA del beep di wake word (BEEP_DEVICE in
 # xvf3800_wakeword_listener.py). Se cambi scheda audio, aggiorna
 # anche qui oppure sovrascrivi da config.json (vedi apply_config
@@ -55,12 +62,22 @@ COMMAND_SOUND_DEVICE = "plughw:3,0"
 COMMAND_FEEDBACK_ENABLED = True
 
 # Sintesi vocale (annunci dinamici, es. "timer di dieci minuti
-# creato") tramite espeak-ng: leggero, offline, un solo
-# pacchetto (sudo apt install espeak-ng). Voce robotica ma
-# affidabile — per qualcosa di più naturale si può passare a
-# Piper in futuro, cambiando solo TTS_COMANDO qui sotto.
+# creato"). Due motori intercambiabili, scelti da TTS_ENGINE:
+#
+#   "espeak" (default) -> espeak-ng, robotico ma zero setup
+#                          extra (sudo apt install espeak-ng)
+#   "piper"             -> voce neurale molto più naturale,
+#                          resta leggero (pensato per Pi), ma
+#                          richiede pip install piper-tts + il
+#                          download di un modello voce .onnx
+#                          (vedi services/README.md)
+TTS_ENGINE = "espeak"
+
 TTS_VOCE = "it"
 TTS_VELOCITA = 150
+
+PIPER_BINARY = "piper"
+PIPER_MODEL = ""
 
 
 # ============================================================
@@ -79,14 +96,17 @@ def apply_config(cfg):
             "enabled": true,
             "device": "plughw:3,0",
             "ok_file": "./sounds/command_ok.wav",
-            "error_file": "./sounds/command_error.wav"
+            "error_file": "./sounds/command_error.wav",
+            "timer_alarm_file": "./sounds/timer_finished.wav",
+            "timer_alarm_gap_seconds": 2.0
         }
     """
 
     global COMMAND_OK_FILE, COMMAND_ERROR_FILE
-    global TIMER_ALARM_FILE
+    global TIMER_ALARM_FILE, TIMER_ALARM_GAP_SECONDS
     global COMMAND_SOUND_DEVICE, COMMAND_FEEDBACK_ENABLED
-    global TTS_VOCE, TTS_VELOCITA
+    global TTS_ENGINE, TTS_VOCE, TTS_VELOCITA
+    global PIPER_BINARY, PIPER_MODEL
 
     if not cfg:
         return
@@ -121,6 +141,14 @@ def apply_config(cfg):
     if alarm_override:
         TIMER_ALARM_FILE = _resolve(alarm_override)
 
+    TIMER_ALARM_GAP_SECONDS = cfg.get(
+        "timer_alarm_gap_seconds", TIMER_ALARM_GAP_SECONDS
+    )
+
+    TTS_ENGINE = cfg.get(
+        "tts_engine", TTS_ENGINE
+    )
+
     TTS_VOCE = cfg.get(
         "tts_voice", TTS_VOCE
     )
@@ -128,6 +156,25 @@ def apply_config(cfg):
     TTS_VELOCITA = cfg.get(
         "tts_speed", TTS_VELOCITA
     )
+
+    PIPER_BINARY = cfg.get(
+        "piper_binary", PIPER_BINARY
+    )
+
+    piper_model_override = cfg.get("piper_model")
+
+    if piper_model_override:
+        PIPER_MODEL = _resolve(piper_model_override)
+
+    if (
+        TTS_ENGINE == "piper"
+        and not (PIPER_MODEL and os.path.isfile(PIPER_MODEL))
+    ):
+        print(
+            "[SOUND] ATTENZIONE: tts_engine=piper ma "
+            "piper_model non trovato: "
+            f"{PIPER_MODEL or '(non impostato)'}"
+        )
 
     for label, path in (
         ("ok_file", COMMAND_OK_FILE),
@@ -335,21 +382,100 @@ def _run_alarm_loop() -> None:
             with _alarm_lock:
                 _alarm_process = None
 
+        # Pausa di silenzio reale tra un trillo e l'altro. Senza
+        # questa pausa la suoneria è un loop pressoché continuo:
+        # non c'è mai un momento di silenzio in cui il wake word
+        # listener possa sentire "spegni timer", e per fermare la
+        # suoneria serve proprio la voce — un blocco circolare.
+        # _alarm_stop_event.wait() invece di time.sleep(): se
+        # stop_timer_alarm() arriva durante la pausa (perché
+        # l'utente è comunque riuscito a farsi sentire, o l'ha
+        # fermata da altrove), la pausa si interrompe subito
+        # invece di aspettare tutto TIMER_ALARM_GAP_SECONDS.
+        if _alarm_stop_event.wait(
+            timeout=TIMER_ALARM_GAP_SECONDS
+        ):
+            return
+
 
 # ============================================================
 # SINTESI VOCALE (annunci dinamici)
 # ============================================================
 
+def _sintetizza_espeak(
+    testo: str,
+    tmp_path: str
+) -> bool:
+    risultato = subprocess.run(
+        [
+            "espeak-ng",
+            "-v", TTS_VOCE,
+            "-s", str(TTS_VELOCITA),
+            "-w", tmp_path,
+            testo,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10.0,
+    )
+
+    if risultato.returncode != 0:
+        print(
+            "[SOUND] espeak-ng fallito: "
+            f"{risultato.stderr.strip()}"
+        )
+        return False
+
+    return True
+
+
+def _sintetizza_piper(
+    testo: str,
+    tmp_path: str
+) -> bool:
+    if not PIPER_MODEL:
+        print(
+            "[SOUND] tts_engine=piper ma piper_model non "
+            "configurato in config.json "
+            "(command_feedback.piper_model)"
+        )
+        return False
+
+    risultato = subprocess.run(
+        [
+            PIPER_BINARY,
+            "--model", PIPER_MODEL,
+            "--output_file", tmp_path,
+        ],
+        input=testo,
+        capture_output=True,
+        text=True,
+        timeout=15.0,
+    )
+
+    if risultato.returncode != 0:
+        print(
+            "[SOUND] piper fallito: "
+            f"{risultato.stderr.strip()}"
+        )
+        return False
+
+    return True
+
+
 def speak(
     testo: str
 ) -> None:
     """
-    Sintetizza e riproduce una frase con espeak-ng (es. "timer
-    di dieci minuti creato"). A differenza dei wav fissi sopra,
-    il contenuto è dinamico, quindi non può essere pre-
-    registrato — va generato al volo, in un thread separato per
-    non bloccare il chiamante (stesso principio di
-    _play_sequence).
+    Sintetizza e riproduce una frase (es. "timer di dieci
+    minuti creato"). A differenza dei wav fissi sopra, il
+    contenuto è dinamico, quindi non può essere pre-registrato
+    — va generato al volo, in un thread separato per non
+    bloccare il chiamante (stesso principio di _play_sequence).
+
+    Motore scelto da TTS_ENGINE ("espeak" di default, oppure
+    "piper" per una voce neurale più naturale — vedi il
+    commento sulle costanti di modulo più sopra).
     """
 
     if not COMMAND_FEEDBACK_ENABLED:
@@ -369,32 +495,28 @@ def speak(
 
             os.close(descrittore)
 
-            risultato = subprocess.run(
-                [
-                    "espeak-ng",
-                    "-v", TTS_VOCE,
-                    "-s", str(TTS_VELOCITA),
-                    "-w", tmp_path,
-                    testo,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10.0,
-            )
-
-            if risultato.returncode != 0:
-                print(
-                    "[SOUND] espeak-ng fallito: "
-                    f"{risultato.stderr.strip()}"
+            if TTS_ENGINE == "piper":
+                ok = _sintetizza_piper(
+                    testo, tmp_path
                 )
-                return
+            else:
+                ok = _sintetizza_espeak(
+                    testo, tmp_path
+                )
 
-            _play_one(tmp_path, "tts")
+            if ok:
+                _play_one(tmp_path, "tts")
 
         except FileNotFoundError:
+            comando = (
+                PIPER_BINARY
+                if TTS_ENGINE == "piper"
+                else "espeak-ng"
+            )
+
             print(
-                "[SOUND] espeak-ng non trovato "
-                "(installa con: sudo apt install espeak-ng)"
+                f"[SOUND] {comando} non trovato "
+                f"(motore TTS configurato: {TTS_ENGINE})"
             )
 
         except Exception as exc:

@@ -19,3 +19,9 @@ webrtcvad
 
 # MQTT: notifica di fine timer da Home Assistant
 paho-mqtt
+
+# Sintesi vocale Piper (opzionale, voce più naturale di
+# espeak-ng — solo se command_feedback.tts_engine="piper" in
+# config.json, vedi services/README.md). Se resti su espeak-ng
+# non serve installarla.
+# piper-tts
