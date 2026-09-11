@@ -18,6 +18,8 @@ import vosk
 from vosk_listener import normalize_text
 
 import debug_config
+import audio_output_lock
+import sound_feedback
 
 # ============================================================
 # CONFIGURAZIONE
@@ -1855,28 +1857,52 @@ class WakeWordListener:
 
         def _run():
 
+            proc = None
+            stderr_output = ""
+
             try:
 
-                result = subprocess.run(
-                    [
-                        "aplay",
-                        "-q",
-                        "-D",
-                        BEEP_DEVICE,
-                        BEEP_FILE
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=5.0
-                )
+                # Serializza con gli altri suoni (sound_feedback.py)
+                # che riproducono sullo stesso device ALSA hardware
+                # — vedi audio_output_lock.py. Popen (non
+                # subprocess.run) + registrazione per essere
+                # terminabile dall'esterno (es. una seconda wake
+                # word che scatta prima che il beep sia finito).
+                with audio_output_lock.PLAYBACK_LOCK:
 
-                if result.returncode != 0:
+                    proc = subprocess.Popen(
+                        [
+                            "aplay",
+                            "-q",
+                            "-D",
+                            BEEP_DEVICE,
+                            BEEP_FILE
+                        ],
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+
+                    audio_output_lock.register(proc)
+
+                    try:
+                        _, stderr_output = proc.communicate(
+                            timeout=5.0
+                        )
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.communicate()
+                        print("[BEEP] Timeout riproduzione")
+                        return
+                    finally:
+                        audio_output_lock.unregister(proc)
+
+                if proc.returncode > 0:
 
                     print(
                         f"[BEEP] aplay fallito "
                         f"(device={BEEP_DEVICE}, "
                         f"file={BEEP_FILE}): "
-                        f"{result.stderr.strip()}"
+                        f"{(stderr_output or '').strip()}"
                     )
 
             except Exception as e:
@@ -2917,6 +2943,15 @@ class WakeWordListener:
                                 f"rilevata "
                                 f"score={score:.3f}"
                             )
+
+                            # Il comando che sta per arrivare ha
+                            # priorità su qualunque suono già in
+                            # corso (suoneria timer, conferme
+                            # comando, TTS) — niente deve
+                            # continuare a occupare il microfono/
+                            # l'altoparlante mentre proviamo a
+                            # catturare la voce.
+                            sound_feedback.stop_all_playback()
 
                             self.play_beep()
 

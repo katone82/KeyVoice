@@ -3,6 +3,8 @@ import subprocess
 import tempfile
 import threading
 
+import audio_output_lock
+
 # ============================================================
 # SUONI DI CONFERMA COMANDO
 # ============================================================
@@ -204,33 +206,73 @@ def apply_config(cfg):
 def _play_one(path: str, label: str) -> bool:
     """
     Riproduce un singolo file (bloccante: aplay -D ... termina
-    da solo a fine file). Ritorna False se il file manca o aplay
-    fallisce, solo per logging da parte del chiamante.
+    da solo a fine file). Ritorna False se il file manca, aplay
+    fallisce, o la riproduzione viene interrotta da altrove (es.
+    stop_all_playback() quando scatta la wake word) — solo per
+    logging da parte del chiamante.
+
+    Usa Popen (non subprocess.run) e si registra su
+    audio_output_lock apposta per essere terminabile dall'esterno
+    mentre è in corso.
     """
 
     if not os.path.isfile(path):
         print(f"[SOUND] File non trovato ({label}): {path}")
         return False
 
-    try:
-        result = subprocess.run(
-            [
-                "aplay",
-                "-q",
-                "-D",
-                COMMAND_SOUND_DEVICE,
-                path
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5.0
-        )
+    proc = None
+    stderr_output = ""
 
-        if result.returncode != 0:
+    try:
+        # Serializza con gli altri suoni (incluso il beep di wake
+        # word in xvf3800_wakeword_listener.py) che riproducono
+        # sullo stesso device ALSA hardware — vedi
+        # audio_output_lock.py: un "plughw" diretto permette una
+        # sola riproduzione aperta alla volta, altrimenti la
+        # seconda fallisce con "Device or resource busy" invece
+        # di aspettare il proprio turno.
+        with audio_output_lock.PLAYBACK_LOCK:
+
+            proc = subprocess.Popen(
+                [
+                    "aplay",
+                    "-q",
+                    "-D",
+                    COMMAND_SOUND_DEVICE,
+                    path
+                ],
+                stderr=subprocess.PIPE,
+                text=True
+            )
+
+            audio_output_lock.register(proc)
+
+            try:
+                _, stderr_output = proc.communicate(
+                    timeout=5.0
+                )
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                print(f"[SOUND] Timeout riproduzione {label}")
+                return False
+            finally:
+                audio_output_lock.unregister(proc)
+
+        if proc.returncode > 0:
             print(
                 f"[SOUND] aplay fallito ({label}, "
                 f"device={COMMAND_SOUND_DEVICE}, "
-                f"file={path}): {result.stderr.strip()}"
+                f"file={path}): {(stderr_output or '').strip()}"
+            )
+            return False
+
+        if proc.returncode < 0:
+            # Terminato da un segnale (es. stop_all_playback()):
+            # interruzione voluta, non un errore da segnalare come
+            # tale.
+            print(
+                f"[SOUND] Riproduzione {label} interrotta"
             )
             return False
 
@@ -347,6 +389,27 @@ def stop_timer_alarm() -> bool:
     return era_attiva
 
 
+def stop_all_playback() -> None:
+    """
+    Interrompe IMMEDIATAMENTE qualunque riproduzione audio in
+    corso — suoneria timer (e il suo loop, non solo il trillo
+    attuale), conferme comando, TTS. Pensata per essere chiamata
+    dal wake word listener appena riconosce la wake word: il
+    comando che sta per arrivare ha priorità su un suono già
+    avviato, non ha senso fargli aspettare che finisca da solo
+    (in particolare la suoneria del timer, che altrimenti
+    continuerebbe a disturbare la cattura del comando).
+
+    Non interrompe il beep di conferma della wake word stessa
+    (xvf3800_wakeword_listener.py lo riproduce DOPO aver chiamato
+    questa funzione).
+    """
+
+    stop_timer_alarm()
+
+    audio_output_lock.stop_all()
+
+
 def _run_alarm_loop() -> None:
     global _alarm_process
 
@@ -359,21 +422,31 @@ def _run_alarm_loop() -> None:
 
     while not _alarm_stop_event.is_set():
         try:
-            with _alarm_lock:
-                if _alarm_stop_event.is_set():
-                    return
+            # PLAYBACK_LOCK tenuto per l'intera durata di UN
+            # trillo (Popen + wait), non per tutto il loop: tra
+            # una ripetizione e l'altra altri suoni (beep di wake
+            # word, conferme comando) possono comunque riprodursi
+            # — vedi audio_output_lock.py. _alarm_lock resta
+            # scoperto solo attorno alla scrittura di
+            # _alarm_process, come prima (protegge lo stato
+            # condiviso, non l'accesso al device).
+            with audio_output_lock.PLAYBACK_LOCK:
 
-                _alarm_process = subprocess.Popen(
-                    [
-                        "aplay",
-                        "-q",
-                        "-D",
-                        COMMAND_SOUND_DEVICE,
-                        TIMER_ALARM_FILE,
-                    ],
-                )
+                with _alarm_lock:
+                    if _alarm_stop_event.is_set():
+                        return
 
-            _alarm_process.wait()
+                    _alarm_process = subprocess.Popen(
+                        [
+                            "aplay",
+                            "-q",
+                            "-D",
+                            COMMAND_SOUND_DEVICE,
+                            TIMER_ALARM_FILE,
+                        ],
+                    )
+
+                _alarm_process.wait()
 
         except Exception as exc:
             print(

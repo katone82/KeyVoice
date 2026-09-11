@@ -77,6 +77,7 @@ TIMER_CANCELLA_KEYWORDS = {
     "annulla",
     "stop",
     "spegni",
+    "interrompi",
 }
 
 # Parola chiave opzionale che introduce esplicitamente il nome:
