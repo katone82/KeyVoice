@@ -162,9 +162,28 @@ def apply_config(cfg):
         "tts_speed", TTS_VELOCITA
     )
 
-    PIPER_BINARY = cfg.get(
-        "piper_binary", PIPER_BINARY
-    )
+    piper_binary_override = cfg.get("piper_binary")
+
+    if piper_binary_override:
+
+        # Un nome nudo senza separatori di percorso (il default,
+        # "piper") va lasciato invariato: si affida alla ricerca
+        # nel PATH del processo, che _resolve() romperebbe
+        # trasformandolo in "<cartella progetto>/piper" (file che
+        # non esiste). Solo se contiene un separatore — quindi è
+        # chiaramente un percorso, es. "keyvoiceenv/bin/piper" —
+        # lo risolviamo relativo alla cartella del progetto come
+        # già facciamo per piper_model: altrimenti un path
+        # relativo dipenderebbe dalla working directory del
+        # processo systemd al momento della chiamata (non detto
+        # sia la cartella di KeyVoice), fragile e imprevedibile.
+        if (
+            "/" in piper_binary_override
+            or "\\" in piper_binary_override
+        ):
+            PIPER_BINARY = _resolve(piper_binary_override)
+        else:
+            PIPER_BINARY = piper_binary_override
 
     piper_model_override = cfg.get("piper_model")
 
