@@ -9,9 +9,13 @@ import wave
 import math
 import re
 
+import json
+
 import numpy as np
 import sounddevice as sd
-from openwakeword.model import Model
+import vosk
+
+from vosk_listener import normalize_text
 
 import debug_config
 
@@ -41,58 +45,36 @@ CHANNELS = 2
 # confronta gli score in [WAKE-DEBUG] a parità di distanza/voce.
 WAKE_AUDIO_CHANNEL = 0
 
-WAKEWORD = "hey_jarvis"
+# ------------------------------------------------------------
+# MOTORE WAKE WORD: VOSK A GRAMMATICA CHIUSA
+# ------------------------------------------------------------
+#
+# Riusa il motore ASR già in uso nel progetto per trascrivere i
+# comandi (vosk_listener.py), con una grammatica ristretta alla
+# sola frase di attivazione + il token "[unk]" per tutto il resto
+# — stessa tecnica già impiegata in vosk_listener.py per i comandi
+# domotici (entities/azioni, vedi build_vosk_grammar()). La frase
+# passa per normalize_text() esattamente come le entities, per
+# coerenza. Un motore ASR pieno è, per costruzione, più robusto al
+# rumore/sorgenti concorrenti rispetto a un modello wake-word
+# dedicato piccolo, a costo di più CPU.
+#
+# NOTA: carica un SECONDO modello Vosk in memoria, indipendente da
+# quello usato da vosk_listener.py per i comandi (i due thread non
+# condividono nulla). Se il modello configurato è pesante,
+# valutare la condivisione di un'unica istanza vosk.Model tra i
+# due thread invece di caricarla due volte.
+VOSK_MODEL_PATH = ""
 
-# ------------------------------------------------------------
-# Soglia a due livelli
-# ------------------------------------------------------------
-# Un singolo chunk molto sicuro scatta subito (WAKE_THRESHOLD_HIGH).
-# Un chunk meno sicuro (parlato più debole/distante/mugugnato)
-# richiede conferma su più chunk consecutivi sopra una soglia più
-# bassa (WAKE_THRESHOLD_LOW + WAKE_CONFIRM_CHUNKS): cattura più
-# pronunce reali senza abbassare la soglia unica e aumentare i
-# falsi positivi su rumore.
-# Ritara osservando i valori reali negli score [WAKE-DEBUG].
-WAKE_THRESHOLD_HIGH = 0.45
-WAKE_THRESHOLD_LOW = 0.15
-WAKE_CONFIRM_CHUNKS = 3
+VOSK_WAKE_PHRASE = "hey jarvis"
 
 # Dopo la fine di un comando (reset_to_listening), per questa
-# finestra la wake word scatta SOLO tramite la soglia alta a
-# singolo chunk (score >= WAKE_THRESHOLD_HIGH): il percorso a
-# soglia bassa + conferma multi-chunk viene disattivato.
-#
-# Motivo: subito dopo un comando (click del relè di uno switch,
-# coda del beep, rumore residuo dalla stessa direzione appena
-# bloccata) capita un punteggio debole ma sostenuto su più chunk
-# che con WAKE_THRESHOLD_LOW/WAKE_CONFIRM_CHUNKS normali arriva
-# comunque a scattare come falsa wake word, facendo partire una
-# registrazione fantasma. Una vera ripetizione della wake word
-# resta comunque riconosciuta perché supera la soglia alta in un
-# singolo chunk; è solo il percorso "debole ma ripetuto", più
-# vulnerabile al rumore, a essere sospeso per un po'.
+# finestra la wake word viene ignorata anche se riconosciuta:
+# subito dopo un comando (click del relè di uno switch, coda del
+# beep, rumore residuo dalla stessa direzione appena bloccata) è
+# più probabile un innesco spurio. Una vera ripetizione della
+# wake word arriva comunque, solo qualche secondo più tardi.
 WAKE_POST_COMMAND_STRICT_SECONDS = 2.0
-
-# openWakeWord è progettato per ricevere audio in blocchi da
-# esattamente 80ms (1280 campioni a 16kHz): è la dimensione con
-# cui la sua pipeline di melspectrogram + embedding è allineata.
-# Il resto del sistema usa BLOCK_SIZE (30ms) per la granularità
-# del gate RMS/direzionale, quindi bufferizziamo l'audio e lo
-# passiamo al modello di wake word in blocchi separati da questa
-# dimensione, invece di alimentarlo con chunk da 30ms non
-# allineati (che abbassano il punteggio di picco raggiunto e
-# costringono a ripetere la wake word più volte).
-WAKE_CHUNK_SAMPLES = 1280
-
-# NOTA: openWakeWord mantiene un proprio buffer streaming
-# interno tra una chiamata a predict() e l'altra (calcola le
-# feature audio in modo incrementale sulla sequenza che gli
-# viene passata). Alimentarlo con finestre sovrapposte (overlap
-# manuale) reinserisce gli stessi campioni due volte nel suo
-# stream interno, disallineando la sua timeline e azzerando lo
-# score. Il chunk successivo deve quindi partire esattamente
-# dove finisce il precedente: nessun overlap, hop = chunk size.
-WAKE_HOP_SAMPLES = WAKE_CHUNK_SAMPLES
 
 # Battito cardiaco: una riga leggera ogni tot secondi mentre si
 # è in ascolto, per confermare che il processo è vivo anche con
@@ -100,9 +82,10 @@ WAKE_HOP_SAMPLES = WAKE_CHUNK_SAMPLES
 # silenzio" da "bloccato per davvero").
 ALIVE_LOG_INTERVAL = 15.0
 
-# Stampa lo score della wake word anche quando resta sotto
-# soglia, per poter tarare WAKE_THRESHOLD_HIGH/LOW osservando i
-# valori reali durante l'uso.
+# Stampa periodicamente cosa sta sentendo il recognizer Vosk
+# (testo parziale/finale), anche quando non è la frase di
+# attivazione — utile per capire se il problema è il riconoscimento
+# o l'audio in ingresso.
 WAKE_DEBUG_INTERVAL = 1.0
 
 # ------------------------------------------------------------
@@ -111,7 +94,7 @@ WAKE_DEBUG_INTERVAL = 1.0
 #
 # Se attiva, tiene sempre in memoria gli ultimi WAKE_DEBUG_AUDIO_
 # SECONDS secondi dell'audio POST-AGC sul canale usato per la
-# wake word (esattamente quello che arriva a model.predict()) e
+# wake word (esattamente quello che arriva al recognizer Vosk) e
 # li scrive periodicamente su file WAV. Serve a rispondere alla
 # domanda "il modello non sente bene, o l'audio che gli arriva è
 # già di per sé poco chiaro?" senza dover indovinare dai soli
@@ -369,10 +352,8 @@ def apply_config(cfg):
     Esempio in config.json:
 
         "openwakeword": {
-            "model": "hey_jarvis",
-            "threshold_high": 0.45,
-            "threshold_low": 0.15,
-            "confirm_chunks": 3,
+            "vosk_model_path": "/home/homeassistant/vosk-model/vosk-model-small-it-0.22",
+            "vosk_wake_phrase": "hey jarvis",
             "post_command_strict_seconds": 2.0,
             "pre_roll_seconds": 0.25,
             "post_wake_ignore_seconds": 0.40,
@@ -404,8 +385,7 @@ def apply_config(cfg):
         }
     """
 
-    global WAKEWORD
-    global WAKE_THRESHOLD_HIGH, WAKE_THRESHOLD_LOW, WAKE_CONFIRM_CHUNKS
+    global VOSK_MODEL_PATH, VOSK_WAKE_PHRASE
     global WAKE_POST_COMMAND_STRICT_SECONDS
     global PRE_ROLL_SECONDS, POST_WAKE_IGNORE_SECONDS
     global COMMAND_TIMEOUT_SECONDS, MAX_COMMAND_SECONDS
@@ -428,17 +408,13 @@ def apply_config(cfg):
     if not cfg:
         return
 
-    WAKEWORD = cfg.get("model", WAKEWORD)
+    VOSK_MODEL_PATH = cfg.get(
+        "vosk_model_path", VOSK_MODEL_PATH
+    )
+    VOSK_WAKE_PHRASE = cfg.get(
+        "vosk_wake_phrase", VOSK_WAKE_PHRASE
+    )
 
-    WAKE_THRESHOLD_HIGH = cfg.get(
-        "threshold_high", WAKE_THRESHOLD_HIGH
-    )
-    WAKE_THRESHOLD_LOW = cfg.get(
-        "threshold_low", WAKE_THRESHOLD_LOW
-    )
-    WAKE_CONFIRM_CHUNKS = cfg.get(
-        "confirm_chunks", WAKE_CONFIRM_CHUNKS
-    )
     WAKE_POST_COMMAND_STRICT_SECONDS = cfg.get(
         "post_command_strict_seconds",
         WAKE_POST_COMMAND_STRICT_SECONDS
@@ -1448,7 +1424,8 @@ class WakeWordListener:
         self,
         vosk_audio_queue=None,
         stop_event=None,
-        ready_event=None
+        ready_event=None,
+        vosk_model=None
     ):
 
         # Coda esterna verso cui inoltrare l'audio del comando
@@ -1456,6 +1433,13 @@ class WakeWordListener:
         # che vosk_listener.py si aspetta di ricevere. None in
         # modalità standalone (esecuzione diretta dello script).
         self.vosk_audio_queue = vosk_audio_queue
+
+        # Istanza vosk.Model già caricata dal chiamante (vedi
+        # run_service.py), condivisa con il recognizer dei comandi
+        # in vosk_listener.py per non tenere due copie in RAM. Se
+        # None (es. esecuzione standalone di questo script), la
+        # carichiamo da soli più sotto.
+        self._shared_vosk_model = vosk_model
 
         # threading.Event condiviso con gli altri thread di
         # run_service.py per uno spegnimento cooperativo. None in
@@ -1476,17 +1460,62 @@ class WakeWordListener:
         )
 
         print(
-            "[INIT] Loading OpenWakeWord..."
+            "[INIT] Loading Vosk (motore wake word)..."
         )
 
-        self.model = Model(
-            wakeword_models=[
-                WAKEWORD
-            ]
+        # I log interni di Vosk (livello INFO/WARNING della
+        # libreria nativa) sono molto verbosi: silenziati come già
+        # fa xvf_host per lo stesso motivo (XVF_SILENCE_VENDOR_
+        # LOGS sopra). Impostazione globale della libreria, va
+        # fatta comunque anche se il modello è condiviso.
+        vosk.SetLogLevel(-1)
+
+        if self._shared_vosk_model is not None:
+
+            vosk_model = self._shared_vosk_model
+
+            print(
+                "[INIT] Vosk: uso il modello già caricato "
+                "(condiviso con vosk_listener.py)"
+            )
+
+        else:
+
+            if not VOSK_MODEL_PATH:
+                raise RuntimeError(
+                    "vosk_model_path non è impostato in "
+                    "config.json (sezione \"openwakeword\") — "
+                    "usa lo stesso percorso già impostato in "
+                    "config[\"vosk\"][\"model_path\"]"
+                )
+
+            vosk_model = vosk.Model(VOSK_MODEL_PATH)
+
+        # Stessa normalizzazione (minuscolo, senza accenti/
+        # punteggiatura) applicata alle entities in build_vosk_
+        # grammar() di vosk_listener.py — per coerenza e perché la
+        # grammatica chiusa deve ricevere la frase esattamente
+        # nella forma in cui Vosk la trascriverebbe.
+        self.vosk_wake_phrase = normalize_text(
+            VOSK_WAKE_PHRASE
         )
+
+        grammar_json = json.dumps(
+            [self.vosk_wake_phrase, "[unk]"],
+            ensure_ascii=False
+        )
+
+        self.vosk_recognizer = vosk.KaldiRecognizer(
+            vosk_model,
+            TARGET_SAMPLE_RATE,
+            grammar_json
+        )
+
+        self.vosk_recognizer.SetWords(False)
 
         print(
-            "[INIT] OpenWakeWord loaded"
+            "[INIT] Vosk (wake word) loaded "
+            f"(frase='{self.vosk_wake_phrase}')"
         )
 
         self.device_index = self._find_audio_device()
@@ -1546,17 +1575,20 @@ class WakeWordListener:
 
         self.last_wake_debug = 0.0
 
-        # Storico a rotazione dei chunk POST-AGC (esattamente
-        # quelli passati a model.predict()) per la registrazione
+        # Storico a rotazione dei blocchi POST-AGC (esattamente
+        # quelli passati al recognizer Vosk) per la registrazione
         # di debug "scatola nera" — vedi WAKE_DEBUG_AUDIO_ENABLED.
-        # maxlen in "numero di chunk da 80ms", non in campioni: un
-        # chunk = WAKE_CHUNK_SAMPLES campioni = 80ms.
+        # maxlen in "numero di blocchi da BLOCK_SIZE (30ms)", non
+        # in campioni: a differenza di un modello wake-word
+        # dedicato, Vosk non impone una dimensione di chunk fissa,
+        # quindi alimentiamo direttamente i blocchi così come
+        # arrivano dal device.
         self.wake_debug_audio = collections.deque(
             maxlen=max(
                 1,
                 int(
                     WAKE_DEBUG_AUDIO_SECONDS
-                    / (WAKE_CHUNK_SAMPLES / TARGET_SAMPLE_RATE)
+                    / (BLOCK_SIZE / TARGET_SAMPLE_RATE)
                 )
             )
         )
@@ -1569,19 +1601,17 @@ class WakeWordListener:
         # di accodarsi, il rolling buffer si aggiorna comunque.
         self.wake_debug_audio_write_lock = threading.Lock()
 
-        # Buffer per accumulare i campioni (arrivano a blocchi di
-        # BLOCK_SIZE, 30ms) e alimentare openWakeWord in chunk
-        # correttamente allineati da WAKE_CHUNK_SAMPLES (80ms).
-        self.wake_buffer = np.zeros(0, dtype=np.int16)
+        # Ultimo testo (parziale o finale) restituito dal
+        # recognizer Vosk — usato per il debug periodico, mostra
+        # cosa il motore sta davvero sentendo anche quando non è
+        # la frase di attivazione.
+        self.last_wake_text = ""
 
-        # Quanti chunk consecutivi sopra WAKE_THRESHOLD_LOW ma
-        # sotto WAKE_THRESHOLD_HIGH abbiamo visto finora (per il
-        # trigger a due livelli, vedi check_wakeword).
-        self.wake_confirm_count = 0
-
-        # Ultimo score realmente calcolato dal modello (aggiornato
-        # solo quando un chunk da 80ms è stato effettivamente
-        # processato), usato per il debug periodico.
+        # Punteggio "sintetico" (1.0 se rilevata in quest'ultimo
+        # blocco, altrimenti 0.0) — Vosk in modalità a grammatica
+        # chiusa non produce un punteggio continuo, ma teniamo
+        # questo campo per uniformità con il resto del debug
+        # periodico.
         self.last_wake_score = 0.0
 
         # Picco raw (pre-AGC) e guadagno applicato dall'ultimo
@@ -2003,88 +2033,74 @@ class WakeWordListener:
     # ========================================================
 
     def check_wakeword(self, audio):
+        """
+        A differenza di un modello wake-word dedicato (che impone
+        chunk di dimensione fissa e restituisce un punteggio
+        continuo da sogliare), Vosk accetta blocchi di lunghezza
+        qualsiasi e — in modalità a grammatica chiusa — restituisce
+        sempre e solo una delle frasi della grammatica (qui: la
+        frase di attivazione o "[unk]"). Alimentiamo quindi
+        direttamente il blocco così come arriva dal device (30ms),
+        senza bufferizzazione a parte.
+        """
 
         mono = audio[:, WAKE_AUDIO_CHANNEL]
-
-        # Accumuliamo i campioni ricevuti (blocchi da 30ms) e li
-        # passiamo al modello solo in chunk da esattamente
-        # WAKE_CHUNK_SAMPLES (80ms), la dimensione con cui
-        # openWakeWord è allineato internamente. Un singolo
-        # blocco da 30ms può generare più chunk pronti (o zero,
-        # se non abbiamo ancora accumulato abbastanza campioni).
-        self.wake_buffer = np.concatenate(
-            (self.wake_buffer, mono)
-        )
-
-        wake_detected = False
-        best_score = 0.0
 
         in_strict_window = (
             time.monotonic() - self.command_finished_at
             < WAKE_POST_COMMAND_STRICT_SECONDS
         )
 
-        while len(self.wake_buffer) >= WAKE_CHUNK_SAMPLES:
+        chunk, peak, gain_applicato = normalize_wake_gain(
+            mono
+        )
 
-            chunk = self.wake_buffer[:WAKE_CHUNK_SAMPLES]
+        self.last_wake_peak = peak
+        self.last_wake_gain = gain_applicato
 
-            self.wake_buffer = (
-                self.wake_buffer[WAKE_HOP_SAMPLES:]
+        if WAKE_DEBUG_AUDIO_ENABLED:
+            self.wake_debug_audio.append(chunk.copy())
+
+        got_final = self.vosk_recognizer.AcceptWaveform(
+            chunk.tobytes()
+        )
+
+        if got_final:
+
+            result = json.loads(
+                self.vosk_recognizer.Result()
             )
 
-            chunk, peak, gain_applicato = normalize_wake_gain(
-                chunk
+            text = result.get("text", "")
+
+        else:
+
+            result = json.loads(
+                self.vosk_recognizer.PartialResult()
             )
 
-            self.last_wake_peak = peak
-            self.last_wake_gain = gain_applicato
+            text = result.get("partial", "")
 
-            if WAKE_DEBUG_AUDIO_ENABLED:
-                self.wake_debug_audio.append(chunk.copy())
+        self.last_wake_text = text
 
-            prediction = self.model.predict(
-                chunk
-            )
+        detected = (
+            bool(text)
+            and self.vosk_wake_phrase in text
+        )
 
-            score = prediction.get(
-                WAKEWORD,
-                0.0
-            )
+        self.last_wake_score = 1.0 if detected else 0.0
 
-            if score > best_score:
-                best_score = score
+        wake_detected = False
 
-            self.last_wake_score = score
+        if detected and not in_strict_window:
 
-            # ------------------------------------------------
-            # TRIGGER A DUE LIVELLI
-            # ------------------------------------------------
+            wake_detected = True
 
-            if score >= WAKE_THRESHOLD_HIGH:
-
-                wake_detected = True
-
-                self.wake_confirm_count = 0
-
-            elif (
-                not in_strict_window
-                and score >= WAKE_THRESHOLD_LOW
-            ):
-
-                self.wake_confirm_count += 1
-
-                if (
-                    self.wake_confirm_count
-                    >= WAKE_CONFIRM_CHUNKS
-                ):
-
-                    wake_detected = True
-
-                    self.wake_confirm_count = 0
-
-            else:
-
-                self.wake_confirm_count = 0
+            # Ricomincia da uno stato pulito: altrimenti il testo
+            # già riconosciuto resterebbe nel buffer interno del
+            # recognizer e potrebbe ri-matchare alla chiamata
+            # successiva senza una nuova pronuncia.
+            self.vosk_recognizer.Reset()
 
         now = time.monotonic()
 
@@ -2097,9 +2113,7 @@ class WakeWordListener:
             self.last_wake_debug = now
 
             print(
-                f"[WAKE-DEBUG] score={self.last_wake_score:.3f} "
-                f"high={WAKE_THRESHOLD_HIGH} "
-                f"low={WAKE_THRESHOLD_LOW} "
+                f"[WAKE-DEBUG] text='{self.last_wake_text}' "
                 f"peak={self.last_wake_peak:.0f} "
                 f"gain={self.last_wake_gain:.2f}x "
                 f"strict={'Y' if in_strict_window else 'N'}"
@@ -2116,7 +2130,7 @@ class WakeWordListener:
 
             self._write_wake_debug_audio()
 
-        return wake_detected, best_score
+        return wake_detected, self.last_wake_score
 
     # ========================================================
     # DEBUG: REGISTRAZIONE "SCATOLA NERA"
@@ -2761,18 +2775,13 @@ class WakeWordListener:
                     f"Channels    : {CHANNELS}"
                 )
                 print(
-                    f"Wake word   : {WAKEWORD}"
+                    f"Engine      : vosk"
                 )
                 print(
-                    f"Threshold   : "
-                    f"high={WAKE_THRESHOLD_HIGH} "
-                    f"low={WAKE_THRESHOLD_LOW} "
-                    f"(x{WAKE_CONFIRM_CHUNKS} chunk)"
+                    f"Wake phrase : {self.vosk_wake_phrase}"
                 )
                 print(
-                    f"Chunk/hop   : "
-                    f"{WAKE_CHUNK_SAMPLES}/"
-                    f"{WAKE_HOP_SAMPLES} campioni"
+                    f"Vosk model  : {VOSK_MODEL_PATH}"
                 )
                 print(
                     f"Start ratio : "
@@ -2915,33 +2924,20 @@ class WakeWordListener:
 
                             self.speech_start_candidate = None
 
-                            self.wake_confirm_count = 0
-
-                            # check_wakeword() non viene più
-                            # chiamato per tutta la durata di
-                            # WAIT_COMMAND/RECORDING (anche
-                            # diversi secondi): i campioni non
-                            # ancora raggruppati in un chunk da
-                            # 80ms restano fermi qui. Senza questo
-                            # reset, al ritorno in LISTENING
-                            # verrebbero incollati a campioni
-                            # freschi arrivati secondi dopo,
-                            # creando una cucitura innaturale che
-                            # il modello elabora come audio
-                            # continuo e può produrre uno score
-                            # fasullo sul primo chunk dopo la
-                            # ripresa. last_wake_score va azzerato
-                            # per lo stesso motivo: altrimenti il
-                            # log [WAKE-DEBUG] può mostrare, alla
-                            # ripresa, il punteggio "congelato"
-                            # dell'ultimo chunk visto PRIMA di
-                            # questa wake word, non un valore
-                            # realmente aggiornato.
-                            self.wake_buffer = np.zeros(
-                                0, dtype=np.int16
-                            )
-
+                            # A differenza di un modello wake-word
+                            # dedicato, qui non serve azzerare
+                            # nessun buffer di accumulo: il
+                            # recognizer Vosk è già stato
+                            # resettato dentro check_wakeword() nel
+                            # momento stesso in cui ha rilevato la
+                            # frase, quindi riparte pulito quando
+                            # check_wakeword() verrà richiamato al
+                            # ritorno in LISTENING (senza cuciture
+                            # tra audio "vecchio" e "nuovo" come
+                            # capiterebbe con un modello che
+                            # bufferizza a chunk fissi).
                             self.last_wake_score = 0.0
+                            self.last_wake_text = ""
 
                             # Catturiamo subito la direzione da
                             # cui è arrivata la wake word stessa:

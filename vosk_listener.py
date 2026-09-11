@@ -609,7 +609,8 @@ def vosk_listener(
     stop_event: threading.Event,
     config: dict,
     command_queue: Queue = None,
-    ready_event=None
+    ready_event=None,
+    model=None
 ) -> None:
     """
     Thread Vosk di KeyVoice.
@@ -634,43 +635,58 @@ def vosk_listener(
     Nessun PartialResult viene mai inviato al fuzzy.
     """
 
-    model_path = config[
-        "model_path"
-    ]
-
     print(
         "[VOLK] Thread partito"
-    )
-
-    print(
-        "[VOLK] "
-        f"Caricamento modello da: "
-        f"{model_path}"
     )
 
     # ========================================================
     # MODEL
     # ========================================================
+    #
+    # Se il chiamante ha già passato un'istanza (vedi run_service.
+    # py: lo stesso vosk.Model viene condiviso con il recognizer
+    # della wake word in xvf3800_wakeword_listener.py, per non
+    # tenere due copie del modello in RAM), la riusiamo invece di
+    # ricaricarla da disco.
 
-    try:
+    if model is None:
 
-        model = vosk.Model(
-            model_path
-        )
-
-    except Exception as exc:
+        model_path = config[
+            "model_path"
+        ]
 
         print(
             "[VOLK] "
-            f"ERRORE caricamento modello: "
-            f"{exc}"
+            f"Caricamento modello da: "
+            f"{model_path}"
         )
 
-        return
+        try:
 
-    print(
-        "[VOLK] Modello caricato"
-    )
+            model = vosk.Model(
+                model_path
+            )
+
+        except Exception as exc:
+
+            print(
+                "[VOLK] "
+                f"ERRORE caricamento modello: "
+                f"{exc}"
+            )
+
+            return
+
+        print(
+            "[VOLK] Modello caricato"
+        )
+
+    else:
+
+        print(
+            "[VOLK] Modello Vosk condiviso "
+            "(già caricato altrove)"
+        )
 
     # ========================================================
     # GRAMMAR

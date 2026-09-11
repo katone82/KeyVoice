@@ -6,6 +6,8 @@ import requests
 import os
 import sys
 
+import vosk
+
 import debug_config
 import sound_feedback
 from vosk_listener import vosk_listener
@@ -49,6 +51,19 @@ apply_config(CONFIG.get("openwakeword", {}))
 sound_feedback.apply_config(CONFIG.get("command_feedback", {}))
 
 # ==============================
+# Modello Vosk condiviso
+# ==============================
+# Caricato UNA volta qui e passato sia al thread comandi
+# (vosk_listener) sia al thread wake word (WakeWordListener, che
+# lo usa per il recognizer a grammatica chiusa "hey jarvis"):
+# vosk.Model puo' essere usato da piu' KaldiRecognizer
+# contemporaneamente, quindi non serve caricarlo due volte e
+# tenere doppia RAM occupata per lo stesso modello.
+print("[MAIN] Caricamento modello Vosk condiviso...")
+VOSK_MODEL = vosk.Model(CONFIG["vosk"]["model_path"])
+print("[MAIN] Modello Vosk caricato")
+
+# ==============================
 # Coda audio e segnali di pronto
 # ==============================
 audio_queue = queue.Queue()
@@ -70,7 +85,8 @@ def vosk_thread():
         stop_event,
         CONFIG["vosk"],
         command_queue=command_queue,
-        ready_event=vosk_ready_event
+        ready_event=vosk_ready_event,
+        model=VOSK_MODEL
     )
 
 def wakeword_thread():
@@ -88,7 +104,8 @@ def wakeword_thread():
     listener = WakeWordListener(
         vosk_audio_queue=audio_queue,
         stop_event=stop_event,
-        ready_event=wakeword_ready_event
+        ready_event=wakeword_ready_event,
+        vosk_model=VOSK_MODEL
     )
     listener.run()
 
