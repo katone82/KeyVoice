@@ -8,7 +8,9 @@ Il countdown dei timer vive in Home Assistant (dominio
 2. chiedere a HA di avviare/cancellare il timer via REST
    (`timer.start` / `timer.cancel`);
 3. ascoltare via MQTT quando HA segnala che un timer è finito,
-   e dare il feedback sonoro.
+   e dare il feedback sonoro;
+4. annunciare a voce la creazione del timer (es. "timer torta
+   di dieci minuti creato") tramite sintesi vocale espeak-ng.
 
 ## Setup Home Assistant
 
@@ -34,13 +36,15 @@ Avvio (con o senza nome libero):
     avvia un timer per la pizza di due ore
 
 Cancellazione (per nome se più timer sono attivi, altrimenti
-generica):
+generica) — spegne anche subito la suoneria di un timer già
+scaduto, se in corso:
 
     cancella il timer
     cancella il timer torta
     ferma timer chiamato torta
     annulla timer
     stop timer
+    spegni timer
 
 Durate riconosciute: 1-60 minuti, 1-12 ore (vedi
 `TIMER_MAX_MINUTI` / `TIMER_MAX_ORE` in `vosk_listener.py`).
@@ -61,10 +65,23 @@ quel testo per riconoscere nome e durata. Per tutti gli altri
 comandi (domotica) il comportamento resta quello di prima,
 invariato.
 
+## Setup sintesi vocale (annuncio "timer creato")
+
+Serve `espeak-ng` sul Pi (non è una libreria Python, va
+installato via apt):
+
+    sudo apt install espeak-ng
+
+Senza `espeak-ng` l'annuncio semplicemente non viene detto: nel
+log compare `[SOUND] espeak-ng non trovato`, il resto del
+timer (avvio su HA, suoneria di fine) continua a funzionare
+normalmente.
+
 ## Configurazione opzionale in config.json
 
 Broker MQTT usato per la notifica di fine timer (default: lo
-stesso broker locale di zigbee2mqtt):
+stesso broker locale di zigbee2mqtt), e voce/velocità della
+sintesi vocale (default: italiano, 150 parole/min):
 
     {
       "mqtt": {
@@ -72,5 +89,9 @@ stesso broker locale di zigbee2mqtt):
         "port": 1883,
         "username": "zigbee2mqtt",
         "password": "..."
+      },
+      "command_feedback": {
+        "tts_voice": "it",
+        "tts_speed": 150
       }
     }

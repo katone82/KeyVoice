@@ -10,7 +10,11 @@ import requests
 from rapidfuzz import process
 
 import sound_feedback
-from numeri_italiani import PAROLA_A_NUMERO
+from numeri_italiani import (
+    PAROLA_A_NUMERO,
+    numero_in_parole,
+    parola_numero_singolare,
+)
 
 
 # ============================================================
@@ -1181,6 +1185,57 @@ def _formatta_durata(
     )
 
 
+def _formatta_durata_parlata(
+    durata_secondi: int
+) -> str:
+    """
+    Converte la durata in una frase italiana naturale, per
+    l'annuncio vocale (es. 600 -> "dieci minuti", 3600 ->
+    "un'ora"). La durata arriva sempre da un singolo multiplo
+    di minuti o di ore (mai composta), vedi
+    _trova_durata_con_indice(): la conversione è quindi
+    l'inverso diretto di quel parsing.
+    """
+
+    if durata_secondi % 3600 == 0:
+        ore = durata_secondi // 3600
+
+        numero = (
+            parola_numero_singolare(ore)
+            if ore == 1
+            else numero_in_parole(ore)
+        )
+
+        unita = "ora" if ore == 1 else "ore"
+
+    else:
+        minuti = durata_secondi // 60
+
+        numero = (
+            parola_numero_singolare(minuti)
+            if minuti == 1
+            else numero_in_parole(minuti)
+        )
+
+        unita = "minuto" if minuti == 1 else "minuti"
+
+    return f"{numero} {unita}"
+
+
+def _annuncio_timer_creato(
+    nome,
+    durata_secondi: int
+) -> str:
+    durata_testo = _formatta_durata_parlata(
+        durata_secondi
+    )
+
+    if nome:
+        return f"Timer {nome} di {durata_testo} creato"
+
+    return f"Timer di {durata_testo} creato"
+
+
 def _trova_slot_libero():
     with _timer_slots_lock:
         for entity_id in TIMER_ENTITIES:
@@ -1344,7 +1399,12 @@ def timer_command_consumer():
                             f"({comando['durata']}s)"
                         )
 
-                        sound_feedback.play_command_ok()
+                        sound_feedback.speak(
+                            _annuncio_timer_creato(
+                                comando["nome"],
+                                comando["durata"]
+                            )
+                        )
 
                     else:
                         sound_feedback.play_command_error()

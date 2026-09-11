@@ -1,5 +1,6 @@
 import os
 import subprocess
+import tempfile
 import threading
 
 # ============================================================
@@ -53,6 +54,14 @@ COMMAND_SOUND_DEVICE = "plughw:3,0"
 
 COMMAND_FEEDBACK_ENABLED = True
 
+# Sintesi vocale (annunci dinamici, es. "timer di dieci minuti
+# creato") tramite espeak-ng: leggero, offline, un solo
+# pacchetto (sudo apt install espeak-ng). Voce robotica ma
+# affidabile — per qualcosa di più naturale si può passare a
+# Piper in futuro, cambiando solo TTS_COMANDO qui sotto.
+TTS_VOCE = "it"
+TTS_VELOCITA = 150
+
 
 # ============================================================
 # CONFIG DA config.json (opzionale)
@@ -77,6 +86,7 @@ def apply_config(cfg):
     global COMMAND_OK_FILE, COMMAND_ERROR_FILE
     global TIMER_ALARM_FILE
     global COMMAND_SOUND_DEVICE, COMMAND_FEEDBACK_ENABLED
+    global TTS_VOCE, TTS_VELOCITA
 
     if not cfg:
         return
@@ -110,6 +120,14 @@ def apply_config(cfg):
 
     if alarm_override:
         TIMER_ALARM_FILE = _resolve(alarm_override)
+
+    TTS_VOCE = cfg.get(
+        "tts_voice", TTS_VOCE
+    )
+
+    TTS_VELOCITA = cfg.get(
+        "tts_speed", TTS_VELOCITA
+    )
 
     for label, path in (
         ("ok_file", COMMAND_OK_FILE),
@@ -316,3 +334,81 @@ def _run_alarm_loop() -> None:
         finally:
             with _alarm_lock:
                 _alarm_process = None
+
+
+# ============================================================
+# SINTESI VOCALE (annunci dinamici)
+# ============================================================
+
+def speak(
+    testo: str
+) -> None:
+    """
+    Sintetizza e riproduce una frase con espeak-ng (es. "timer
+    di dieci minuti creato"). A differenza dei wav fissi sopra,
+    il contenuto è dinamico, quindi non può essere pre-
+    registrato — va generato al volo, in un thread separato per
+    non bloccare il chiamante (stesso principio di
+    _play_sequence).
+    """
+
+    if not COMMAND_FEEDBACK_ENABLED:
+        return
+
+    if not testo:
+        return
+
+    def _run():
+        tmp_path = None
+
+        try:
+            descrittore, tmp_path = tempfile.mkstemp(
+                suffix=".wav",
+                prefix="keyvoice_tts_",
+            )
+
+            os.close(descrittore)
+
+            risultato = subprocess.run(
+                [
+                    "espeak-ng",
+                    "-v", TTS_VOCE,
+                    "-s", str(TTS_VELOCITA),
+                    "-w", tmp_path,
+                    testo,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10.0,
+            )
+
+            if risultato.returncode != 0:
+                print(
+                    "[SOUND] espeak-ng fallito: "
+                    f"{risultato.stderr.strip()}"
+                )
+                return
+
+            _play_one(tmp_path, "tts")
+
+        except FileNotFoundError:
+            print(
+                "[SOUND] espeak-ng non trovato "
+                "(installa con: sudo apt install espeak-ng)"
+            )
+
+        except Exception as exc:
+            print(
+                f"[SOUND] Errore sintesi vocale: {exc}"
+            )
+
+        finally:
+            if tmp_path and os.path.isfile(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+
+    threading.Thread(
+        target=_run, daemon=True
+    ).start()
