@@ -105,6 +105,30 @@ ALIVE_LOG_INTERVAL = 15.0
 # valori reali durante l'uso.
 WAKE_DEBUG_INTERVAL = 1.0
 
+# ------------------------------------------------------------
+# REGISTRAZIONE DEBUG "SCATOLA NERA" (opzionale)
+# ------------------------------------------------------------
+#
+# Se attiva, tiene sempre in memoria gli ultimi WAKE_DEBUG_AUDIO_
+# SECONDS secondi dell'audio POST-AGC sul canale usato per la
+# wake word (esattamente quello che arriva a model.predict()) e
+# li scrive periodicamente su file WAV. Serve a rispondere alla
+# domanda "il modello non sente bene, o l'audio che gli arriva è
+# già di per sé poco chiaro?" senza dover indovinare dai soli
+# numeri di score/peak nei log: dopo un tentativo fallito, basta
+# riascoltare il file per capire se il problema è a monte (audio)
+# o nel modello stesso.
+#
+# Disattivata di default: scrive su disco (SD card) ogni pochi
+# secondi, quindi va accesa solo per diagnosticare e poi spenta.
+WAKE_DEBUG_AUDIO_ENABLED = False
+
+WAKE_DEBUG_AUDIO_SECONDS = 4.0
+
+WAKE_DEBUG_AUDIO_PATH = "/tmp/keyvoice_wake_debug.wav"
+
+WAKE_DEBUG_AUDIO_WRITE_INTERVAL = 1.0
+
 BLOCK_MS = 30
 BLOCK_SIZE = int(DEVICE_SAMPLE_RATE * BLOCK_MS / 1000)
 
@@ -371,6 +395,9 @@ def apply_config(cfg):
             "fixed_beam_enabled": false,
             "fixed_beam_azimuth_degrees": 0.0,
             "fixed_beam_gating": true,
+            "wake_debug_audio_enabled": false,
+            "wake_debug_audio_seconds": 4.0,
+            "wake_debug_audio_path": "/tmp/keyvoice_wake_debug.wav",
             "beep_device": "plughw:3,0",
             "beep_file": "./sounds/wake.wav",
             "input_device_name": "reSpeaker XVF3800 4-Mic Array"
@@ -393,6 +420,8 @@ def apply_config(cfg):
     global WAKE_AUDIO_CHANNEL
     global XVF_FIXED_BEAM_ENABLED, XVF_FIXED_BEAM_AZIMUTH_DEGREES
     global XVF_FIXED_BEAM_GATING
+    global WAKE_DEBUG_AUDIO_ENABLED, WAKE_DEBUG_AUDIO_SECONDS
+    global WAKE_DEBUG_AUDIO_PATH
     global BEEP_DEVICE, BEEP_FILE
     global INPUT_DEVICE_NAME
 
@@ -486,6 +515,16 @@ def apply_config(cfg):
     )
     XVF_FIXED_BEAM_GATING = cfg.get(
         "fixed_beam_gating", XVF_FIXED_BEAM_GATING
+    )
+
+    WAKE_DEBUG_AUDIO_ENABLED = cfg.get(
+        "wake_debug_audio_enabled", WAKE_DEBUG_AUDIO_ENABLED
+    )
+    WAKE_DEBUG_AUDIO_SECONDS = cfg.get(
+        "wake_debug_audio_seconds", WAKE_DEBUG_AUDIO_SECONDS
+    )
+    WAKE_DEBUG_AUDIO_PATH = cfg.get(
+        "wake_debug_audio_path", WAKE_DEBUG_AUDIO_PATH
     )
 
     BEEP_DEVICE = cfg.get(
@@ -1507,6 +1546,29 @@ class WakeWordListener:
 
         self.last_wake_debug = 0.0
 
+        # Storico a rotazione dei chunk POST-AGC (esattamente
+        # quelli passati a model.predict()) per la registrazione
+        # di debug "scatola nera" — vedi WAKE_DEBUG_AUDIO_ENABLED.
+        # maxlen in "numero di chunk da 80ms", non in campioni: un
+        # chunk = WAKE_CHUNK_SAMPLES campioni = 80ms.
+        self.wake_debug_audio = collections.deque(
+            maxlen=max(
+                1,
+                int(
+                    WAKE_DEBUG_AUDIO_SECONDS
+                    / (WAKE_CHUNK_SAMPLES / TARGET_SAMPLE_RATE)
+                )
+            )
+        )
+
+        self.last_wake_debug_audio_write = 0.0
+
+        # Evita che due scritture del file di debug si sovrappongano
+        # se una scrittura su SD card fosse insolitamente lenta
+        # (>1s): la successiva viene semplicemente saltata invece
+        # di accodarsi, il rolling buffer si aggiorna comunque.
+        self.wake_debug_audio_write_lock = threading.Lock()
+
         # Buffer per accumulare i campioni (arrivano a blocchi di
         # BLOCK_SIZE, 30ms) e alimentare openWakeWord in chunk
         # correttamente allineati da WAKE_CHUNK_SAMPLES (80ms).
@@ -1977,6 +2039,9 @@ class WakeWordListener:
             self.last_wake_peak = peak
             self.last_wake_gain = gain_applicato
 
+            if WAKE_DEBUG_AUDIO_ENABLED:
+                self.wake_debug_audio.append(chunk.copy())
+
             prediction = self.model.predict(
                 chunk
             )
@@ -2040,7 +2105,81 @@ class WakeWordListener:
                 f"strict={'Y' if in_strict_window else 'N'}"
             )
 
+        if (
+            WAKE_DEBUG_AUDIO_ENABLED
+            and self.wake_debug_audio
+            and now - self.last_wake_debug_audio_write
+            >= WAKE_DEBUG_AUDIO_WRITE_INTERVAL
+        ):
+
+            self.last_wake_debug_audio_write = now
+
+            self._write_wake_debug_audio()
+
         return wake_detected, best_score
+
+    # ========================================================
+    # DEBUG: REGISTRAZIONE "SCATOLA NERA"
+    # ========================================================
+
+    def _write_wake_debug_audio(self):
+        """
+        Scrive su WAKE_DEBUG_AUDIO_PATH gli ultimi WAKE_DEBUG_
+        AUDIO_SECONDS secondi di audio POST-AGC sul canale usato
+        per la wake word — esattamente ciò che riceve model.
+        predict(). Permette di verificare a orecchio (o inviando
+        il file per un'analisi) se un tentativo fallito era dovuto
+        a un audio già di per sé poco chiaro/distorto, o se
+        l'audio era pulito e il modello semplicemente non l'ha
+        riconosciuto.
+
+        La copia dei dati avviene qui nel thread audio (veloce,
+        solo numpy), la scrittura su disco (più lenta, I/O SD
+        card) in un thread separato per non introdurre latenza nel
+        loop audio principale.
+        """
+
+        try:
+            buffered = np.concatenate(
+                list(self.wake_debug_audio)
+            ).astype(np.int16)
+        except Exception as e:
+            print(f"[WAKE-DEBUG] Errore bufferizzazione audio debug: {e}")
+            return
+
+        def _write():
+
+            if not self.wake_debug_audio_write_lock.acquire(
+                blocking=False
+            ):
+                return
+
+            try:
+
+                with wave.open(
+                    WAKE_DEBUG_AUDIO_PATH, "wb"
+                ) as wf:
+
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(TARGET_SAMPLE_RATE)
+                    wf.writeframes(buffered.tobytes())
+
+            except Exception as e:
+
+                print(
+                    "[WAKE-DEBUG] Errore scrittura audio "
+                    f"debug: {e}"
+                )
+
+            finally:
+
+                self.wake_debug_audio_write_lock.release()
+
+        threading.Thread(
+            target=_write,
+            daemon=True
+        ).start()
 
     # ========================================================
     # WAIT COMMAND
