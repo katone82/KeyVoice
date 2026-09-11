@@ -218,6 +218,48 @@ XVF_DEBUG_INTERVAL = 0.50
 XVF_SILENCE_VENDOR_LOGS = True
 
 # ------------------------------------------------------------
+# BEAM FISSO (opzionale)
+# ------------------------------------------------------------
+#
+# Di default il canale USB usato per la wake word (WAKE_AUDIO_
+# CHANNEL) porta l'uscita del beam "auto-selezionato": il chip
+# sceglie in autonomia, momento per momento, quale beam è il
+# migliore. Con una seconda sorgente sonora vicina in angolo e
+# comparabile per energia, l'auto-select può saltare avanti e
+# indietro fra le due sorgenti nell'arco di pochi secondi — con
+# quell'audio che salta da una sorgente all'altra a metà frase,
+# la wake word non riesce mai ad accumulare un tratto continuo e
+# pulito della voce giusta (anche quando quest'ultima è ben
+# udibile).
+#
+# Se chi parla resta sempre più o meno nella stessa posizione,
+# la soluzione è puntare un BEAM FISSO su quell'angolo e
+# instradare quel beam (non l'auto-select) sul canale USB, cosa
+# che il chip supporta nativamente (nessuna elaborazione nostra):
+# l'uscita resta agganciata a quella direzione indipendentemente
+# da cosa succede altrove nella stanza. Instradato sulla
+# categoria "AEC residual/ASR" (non sul "communication" col
+# post-processor non lineare) perché quest'ultimo degrada la
+# resa di un motore ASR/wake-word.
+#
+# Disattivato di default: se il firmware/device non supporta
+# questi comandi o li rifiuta, la configurazione fallisce in modo
+# innocuo (loggata, il resto del sistema continua a funzionare
+# con l'auto-select come prima).
+XVF_FIXED_BEAM_ENABLED = False
+
+# Angolo (gradi, stessa convenzione di DOM/DOA nei log [XVF]) su
+# cui puntare il beam fisso 1. Il beam fisso 2 viene puntato sullo
+# stesso angolo (non lo usiamo: instradiamo solo il beam 1), non è
+# un valore critico.
+XVF_FIXED_BEAM_AZIMUTH_DEGREES = 0.0
+
+# Quando abilitato, il beam fisso viene silenziato nei momenti in
+# cui non c'è energia vocale sulla sua direzione, invece di
+# lasciar passare riverbero/coda della sorgente concorrente.
+XVF_FIXED_BEAM_GATING = True
+
+# ------------------------------------------------------------
 # Audio
 # ------------------------------------------------------------
 
@@ -326,6 +368,9 @@ def apply_config(cfg):
             "agc_max_gain": 8.0,
             "agc_silence_floor": 15,
             "wake_audio_channel": 0,
+            "fixed_beam_enabled": false,
+            "fixed_beam_azimuth_degrees": 0.0,
+            "fixed_beam_gating": true,
             "beep_device": "plughw:3,0",
             "beep_file": "./sounds/wake.wav",
             "input_device_name": "reSpeaker XVF3800 4-Mic Array"
@@ -346,6 +391,8 @@ def apply_config(cfg):
     global WAKE_HW_SPEECH_GATE_ENABLED
     global WAKE_AGC_MAX_GAIN, WAKE_AGC_SILENCE_FLOOR
     global WAKE_AUDIO_CHANNEL
+    global XVF_FIXED_BEAM_ENABLED, XVF_FIXED_BEAM_AZIMUTH_DEGREES
+    global XVF_FIXED_BEAM_GATING
     global BEEP_DEVICE, BEEP_FILE
     global INPUT_DEVICE_NAME
 
@@ -428,6 +475,17 @@ def apply_config(cfg):
 
     WAKE_AUDIO_CHANNEL = cfg.get(
         "wake_audio_channel", WAKE_AUDIO_CHANNEL
+    )
+
+    XVF_FIXED_BEAM_ENABLED = cfg.get(
+        "fixed_beam_enabled", XVF_FIXED_BEAM_ENABLED
+    )
+    XVF_FIXED_BEAM_AZIMUTH_DEGREES = cfg.get(
+        "fixed_beam_azimuth_degrees",
+        XVF_FIXED_BEAM_AZIMUTH_DEGREES
+    )
+    XVF_FIXED_BEAM_GATING = cfg.get(
+        "fixed_beam_gating", XVF_FIXED_BEAM_GATING
     )
 
     BEEP_DEVICE = cfg.get(
@@ -670,6 +728,86 @@ class XVF3800Telemetry:
             )
 
         print("[XVF] Dispositivo connesso")
+
+        if XVF_FIXED_BEAM_ENABLED:
+            self._configure_fixed_beam()
+
+    # --------------------------------------------------------
+
+    def _configure_fixed_beam(self):
+        """
+        Punta il beam fisso 1 su XVF_FIXED_BEAM_AZIMUTH_DEGREES e
+        instrada QUEL beam (non l'auto-select) sul canale USB
+        usato per la wake word (WAKE_AUDIO_CHANNEL), sulla
+        categoria "AEC residual/ASR" (7) invece che su
+        "Processed"/communication (6) — quest'ultima passa dal
+        post-processor non lineare che degrada la resa di un
+        motore ASR/wake-word.
+
+        Richiamata da _connect(): se il device si disconnette e
+        _worker() riconnette, la configurazione viene riapplicata
+        automaticamente (il chip non la persiste da solo tra le
+        sessioni USB).
+
+        Fallisce in modo innocuo (solo un log) se il firmware/
+        device non supporta questi comandi: il resto del sistema
+        continua a funzionare con il routing di default
+        (auto-select) come se XVF_FIXED_BEAM_ENABLED fosse False.
+        """
+
+        try:
+
+            azimuth_rad = math.radians(
+                XVF_FIXED_BEAM_AZIMUTH_DEGREES
+            )
+
+            # AEC_FIXEDBEAMSAZIMUTH_VALUES vuole 2 valori (beam
+            # fisso 1, beam fisso 2). Il beam 2 non viene
+            # instradato su nessun canale che leggiamo: puntarlo
+            # sullo stesso angolo del beam 1 è innocuo, serve solo
+            # a evitare di lasciarlo sulla sua direzione di
+            # default (che potrebbe non essere quella voluta).
+            self.device.write(
+                "AEC_FIXEDBEAMSAZIMUTH_VALUES",
+                [azimuth_rad, azimuth_rad]
+            )
+
+            self.device.write(
+                "AEC_FIXEDBEAMSONOFF", [1]
+            )
+
+            self.device.write(
+                "AEC_FIXEDBEAMSGATING",
+                [1 if XVF_FIXED_BEAM_GATING else 0]
+            )
+
+            # category 7 = AEC residual/ASR data; source 0 = beam
+            # fisso 1 (stessa convenzione di indicizzazione beam
+            # usata in AEC_AZIMUTH_VALUES/AEC_SPENERGY_VALUES: 0 =
+            # beam1, 1 = beam2, 2 = beam libero, 3 = auto-select).
+            op_param = (
+                "AUDIO_MGR_OP_L"
+                if WAKE_AUDIO_CHANNEL == 0
+                else "AUDIO_MGR_OP_R"
+            )
+
+            self.device.write(op_param, [7, 0])
+
+            print(
+                "[XVF] Beam fisso attivato: "
+                f"{XVF_FIXED_BEAM_AZIMUTH_DEGREES:.1f}° -> "
+                f"canale {'L' if WAKE_AUDIO_CHANNEL == 0 else 'R'} "
+                f"(gating="
+                f"{'on' if XVF_FIXED_BEAM_GATING else 'off'})"
+            )
+
+        except Exception as e:
+
+            print(
+                f"[XVF] Errore configurazione beam fisso: {e} "
+                "— continuo con il routing di default "
+                "(auto-select)"
+            )
 
     # --------------------------------------------------------
 
