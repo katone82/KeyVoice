@@ -46,12 +46,20 @@ TIMER_ALARM_FILE = os.path.join(
     SCRIPT_DIR, "sounds", "timer_finished.wav"
 )
 
-# Pausa di silenzio (secondi) tra un trillo e l'altro della
-# suoneria di fine timer — vedi _run_alarm_loop(). Deve essere
-# abbastanza lunga da dare al wake word listener una finestra
-# pulita per sentire "spegni timer" nonostante il rumore residuo/
-# riverbero del trillo appena finito.
-TIMER_ALARM_GAP_SECONDS = 2.0
+# Il file va scelto/registrato con pause di silenzio già presenti
+# al suo interno (es. un rintocco che decade naturalmente prima
+# del prossimo giro di loop) — vedi _run_alarm_loop(), che lo
+# riproduce semplicemente in loop senza aggiungere pause di
+# codice. Senza silenzio reale tra un rintocco e l'altro, non c'è
+# mai un momento in cui il wake word listener possa sentire
+# "spegni timer" (per fermare la suoneria serve la voce, quindi
+# un file senza pause crea un blocco circolare).
+#
+# sounds/timer_finished.wav attuale: "Marimba Bloop 1" di
+# floraphonic (pixabay.com/sound-effects/film-special-effects-
+# marimba-bloop-1-188150/), Pixabay Content License (uso libero
+# personale/commerciale, nessuna attribuzione richiesta) —
+# riconvertito da MP3 a WAV mono 48kHz/16-bit.
 
 # Stessa scheda ALSA del beep di wake word (BEEP_DEVICE in
 # xvf3800_wakeword_listener.py). Se cambi scheda audio, aggiorna
@@ -97,13 +105,12 @@ def apply_config(cfg):
             "device": "plughw:3,0",
             "ok_file": "./sounds/command_ok.wav",
             "error_file": "./sounds/command_error.wav",
-            "timer_alarm_file": "./sounds/timer_finished.wav",
-            "timer_alarm_gap_seconds": 2.0
+            "timer_alarm_file": "./sounds/timer_finished.wav"
         }
     """
 
     global COMMAND_OK_FILE, COMMAND_ERROR_FILE
-    global TIMER_ALARM_FILE, TIMER_ALARM_GAP_SECONDS
+    global TIMER_ALARM_FILE
     global COMMAND_SOUND_DEVICE, COMMAND_FEEDBACK_ENABLED
     global TTS_ENGINE, TTS_VOCE, TTS_VELOCITA
     global PIPER_BINARY, PIPER_MODEL
@@ -140,10 +147,6 @@ def apply_config(cfg):
 
     if alarm_override:
         TIMER_ALARM_FILE = _resolve(alarm_override)
-
-    TIMER_ALARM_GAP_SECONDS = cfg.get(
-        "timer_alarm_gap_seconds", TIMER_ALARM_GAP_SECONDS
-    )
 
     TTS_ENGINE = cfg.get(
         "tts_engine", TTS_ENGINE
@@ -381,21 +384,6 @@ def _run_alarm_loop() -> None:
         finally:
             with _alarm_lock:
                 _alarm_process = None
-
-        # Pausa di silenzio reale tra un trillo e l'altro. Senza
-        # questa pausa la suoneria è un loop pressoché continuo:
-        # non c'è mai un momento di silenzio in cui il wake word
-        # listener possa sentire "spegni timer", e per fermare la
-        # suoneria serve proprio la voce — un blocco circolare.
-        # _alarm_stop_event.wait() invece di time.sleep(): se
-        # stop_timer_alarm() arriva durante la pausa (perché
-        # l'utente è comunque riuscito a farsi sentire, o l'ha
-        # fermata da altrove), la pausa si interrompe subito
-        # invece di aspettare tutto TIMER_ALARM_GAP_SECONDS.
-        if _alarm_stop_event.wait(
-            timeout=TIMER_ALARM_GAP_SECONDS
-        ):
-            return
 
 
 # ============================================================
