@@ -89,6 +89,11 @@ TTS_VELOCITA = 150
 PIPER_BINARY = "piper"
 PIPER_MODEL = ""
 
+# Velocità del parlato Piper: 1.0 = normale, >1.0 = più lento,
+# <1.0 = più veloce (es. 1.2 = 20% più lento). Non ha alcun
+# effetto su espeak-ng, che usa TTS_VELOCITA (parole/minuto).
+PIPER_LENGTH_SCALE = 1.0
+
 
 # ============================================================
 # CONFIG DA config.json (opzionale)
@@ -115,7 +120,7 @@ def apply_config(cfg):
     global TIMER_ALARM_FILE
     global COMMAND_SOUND_DEVICE, COMMAND_FEEDBACK_ENABLED
     global TTS_ENGINE, TTS_VOCE, TTS_VELOCITA
-    global PIPER_BINARY, PIPER_MODEL
+    global PIPER_BINARY, PIPER_MODEL, PIPER_LENGTH_SCALE
 
     if not cfg:
         return
@@ -189,6 +194,10 @@ def apply_config(cfg):
 
     if piper_model_override:
         PIPER_MODEL = _resolve(piper_model_override)
+
+    PIPER_LENGTH_SCALE = cfg.get(
+        "piper_length_scale", PIPER_LENGTH_SCALE
+    )
 
     if (
         TTS_ENGINE == "piper"
@@ -525,6 +534,7 @@ def _sintetizza_piper(
         [
             PIPER_BINARY,
             "--model", PIPER_MODEL,
+            "--length-scale", str(PIPER_LENGTH_SCALE),
             "--output_file", tmp_path,
         ],
         input=testo,

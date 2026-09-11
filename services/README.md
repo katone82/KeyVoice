@@ -144,6 +144,12 @@ espeak-ng):
     {
       "command_feedback": {
         "tts_engine": "piper",
-        "piper_model": "/home/homeassistant/.local/share/piper-voices/it_IT-paola-medium.onnx"
+        "piper_model": "/home/homeassistant/.local/share/piper-voices/it_IT-paola-medium.onnx",
+        "piper_length_scale": 1.2
       }
     }
+
+`piper_length_scale` controlla la velocità del parlato: `1.0`
+= normale (default), valori più alti = più lento (`1.2` = 20%
+più lento, `1.5` già abbastanza cadenzato), valori sotto `1.0`
+= più veloce. Non ha effetto su espeak-ng.
