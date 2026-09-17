@@ -157,59 +157,6 @@ views:
                   ignore_case: true
           - type: custom:stack-in-card
             grid_options:
-              columns: 6
-              rows: auto
-            card_mod:
-              style: |
-                ha-card {
-                  background: rgba(255, 112, 67, 0.10);
-                  border: 1px solid rgba(255, 112, 67, 0.45);
-                  border-radius: 24px;
-                  box-shadow: 0 0 25px rgba(255, 112, 67, 0.15);
-                  backdrop-filter: blur(12px);
-                  -webkit-backdrop-filter: blur(12px);
-                  overflow: hidden;
-                }
-            cards:
-              - type: custom:mushroom-template-card
-                primary: 🍳 CUCINA
-                secondary: ''
-                icon: mdi:chef-hat
-                layout: horizontal
-                fill_container: true
-                card_mod:
-                  style: |
-                    ha-card {
-                      background: rgba(255, 112, 67, 0.16);
-                      border: none;
-                      border-radius: 0;
-                      box-shadow: none;
-                    }
-
-                    mushroom-shape-icon {
-                      --shape-color: rgba(255, 112, 67, 0.25) !important;
-                    }
-              - type: custom:auto-entities
-                show_empty: false
-                card_param: cards
-                card:
-                  type: grid
-                  columns: 1
-                  square: false
-                filter:
-                  include:
-                    - area: Cucina
-                      options:
-                        type: tile
-                        tap_action:
-                          action: toggle
-                        hold_action:
-                          action: more-info
-                sort:
-                  method: friendly_name
-                  ignore_case: true
-          - type: custom:stack-in-card
-            grid_options:
               columns: 12
               rows: auto
             card_mod:
@@ -261,4 +208,152 @@ views:
                 sort:
                   method: friendly_name
                   ignore_case: true
+          - type: custom:stack-in-card
+            grid_options:
+              columns: 6
+              rows: auto
+            card_mod:
+              style: |
+                ha-card {
+                  background: rgba(255, 112, 67, 0.10);
+                  border: 1px solid rgba(255, 112, 67, 0.45);
+                  border-radius: 24px;
+                  box-shadow: 0 0 25px rgba(255, 112, 67, 0.15);
+                  backdrop-filter: blur(12px);
+                  -webkit-backdrop-filter: blur(12px);
+                  overflow: hidden;
+                }
+            cards:
+              - type: custom:mushroom-template-card
+                primary: 🍳 CUCINA
+                secondary: ''
+                icon: mdi:chef-hat
+                layout: horizontal
+                fill_container: true
+                card_mod:
+                  style: |
+                    ha-card {
+                      background: rgba(255, 112, 67, 0.16);
+                      border: none;
+                      border-radius: 0;
+                      box-shadow: none;
+                    }
+
+                    mushroom-shape-icon {
+                      --shape-color: rgba(255, 112, 67, 0.25) !important;
+                    }
+              - type: custom:auto-entities
+                show_empty: false
+                card_param: cards
+                card:
+                  type: grid
+                  columns: 1
+                  square: false
+                filter:
+                  include:
+                    - area: Cucina
+                      options:
+                        type: tile
+                        tap_action:
+                          action: toggle
+                        hold_action:
+                          action: more-info
+                sort:
+                  method: friendly_name
+                  ignore_case: true
+        column_span: 4
+  - path: cancelli
+    title: Cancelli
+    icon: mdi:gate
+    type: sections
+    max_columns: 4
+    sections:
+      - type: grid
+        cards:
+          - type: custom:stack-in-card
+            grid_options:
+              columns: 10
+              rows: auto
+            card_mod:
+              style: |
+                ha-card {
+                  background: rgba(3, 169, 244, 0.10);
+                  border: 1px solid rgba(3, 169, 244, 0.45);
+                  border-radius: 24px;
+                  box-shadow: 0 0 25px rgba(3, 169, 244, 0.15);
+                  backdrop-filter: blur(12px);
+                  -webkit-backdrop-filter: blur(12px);
+                  overflow: hidden;
+                }
+            cards:
+              - type: custom:mushroom-template-card
+                primary: 🚪 CANCELLI
+                secondary: ''
+                icon: mdi:gate
+                layout: horizontal
+                fill_container: true
+                card_mod:
+                  style: |
+                    ha-card {
+                      background: rgba(3, 169, 244, 0.16);
+                      border: none;
+                      border-radius: 0;
+                      box-shadow: none;
+                    }
+
+                    mushroom-shape-icon {
+                      --shape-color: rgba(3, 169, 244, 0.25) !important;
+                    }
+              - type: grid
+                columns: 2
+                square: false
+                cards:
+                  - type: custom:mushroom-template-card
+                    primary: Cancello Casa
+                    secondary: >-
+                      {{ 'Apertura in corso...' if
+                      is_state('script.apri_cancello_casa', 'on') else 'Pronto'
+                      }}
+                    icon: mdi:gate
+                    icon_color: >-
+                      {{ 'blue' if is_state('script.apri_cancello_casa', 'on')
+                      else 'grey' }}
+                    layout: vertical
+                    fill_container: true
+                    tap_action:
+                      action: call-service
+                      service: script.turn_on
+                      target:
+                        entity_id: script.apri_cancello_casa
+                    card_mod:
+                      style: |
+                        ha-card {
+                          background: transparent;
+                          border: none;
+                          box-shadow: none;
+                        }
+                  - type: custom:mushroom-template-card
+                    primary: Cancello Strada
+                    secondary: >-
+                      {{ 'Apertura in corso...' if
+                      is_state('script.apri_cancello_strada', 'on') else
+                      'Pronto' }}
+                    icon: mdi:gate
+                    icon_color: >-
+                      {{ 'blue' if is_state('script.apri_cancello_strada', 'on')
+                      else 'grey' }}
+                    layout: vertical
+                    fill_container: true
+                    tap_action:
+                      action: call-service
+                      service: script.turn_on
+                      target:
+                        entity_id: script.apri_cancello_strada
+                    card_mod:
+                      style: |
+                        ha-card {
+                          background: transparent;
+                          border: none;
+                          box-shadow: none;
+                        }
         column_span: 4

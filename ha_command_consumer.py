@@ -20,10 +20,10 @@ def invia_comando_ha(cmd, ha_url=None, ha_token=None):
         "Authorization": f"Bearer {ha_token}",
         "Content-Type": "application/json"
     }
-    # Esempio: accendi/spegni switch/light
-    if cmd['azione'] in ('accendi', 'spegni') and cmd['entity_id']:
+    # Esempio: accendi/spegni switch/light, apri/chiudi cancelli (script)
+    if cmd['azione'] in ('accendi', 'spegni', 'apri', 'chiudi') and cmd['entity_id']:
         domain = cmd['entity_id'].split('.')[0]
-        service = 'turn_on' if cmd['azione'] == 'accendi' else 'turn_off'
+        service = 'turn_on' if cmd['azione'] in ('accendi', 'apri') else 'turn_off'
         url = f"{ha_url}/{domain}/{service}"
         data = {"entity_id": cmd['entity_id']}
         try:
