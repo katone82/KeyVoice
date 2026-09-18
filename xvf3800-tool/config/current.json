@@ -1,0 +1,78 @@
+{
+  "timestamp": "2026-09-04T22:44:26.489339",
+  "parameters": {
+    "VERSION": [
+      2,
+      0,
+      6
+    ],
+    "BLD_MSG": "ua-io16-sqr",
+    "BLD_HOST": "NA",
+    "BLD_REPO_HASH": "4711e91ead2eaf956e1730a524ec8384e38569d3",
+    "BLD_MODIFIED": "TRUE",
+    "BOOT_STATUS": "JoF",
+    "TEST_CORE_BURN": [
+      0
+    ],
+    "USB_BIT_DEPTH": [
+      16,
+      16
+    ],
+    "SPECIAL_CMD_AEC_FILTER_COEFF_START_OFFSET": [
+      0
+    ],
+    "GPO_READ_VALUES": [
+      0,
+      0,
+      0,
+      1,
+      0
+    ],
+    "GPO_WRITE_VALUE": [
+      0,
+      0
+    ],
+    "GPO_PORT_PIN_INDEX": [
+      0,
+      0
+    ],
+    "GPO_PIN_VAL": [
+      0,
+      0,
+      0
+    ],
+    "GPO_PIN_ACTIVE_LEVEL": [
+      0
+    ],
+    "LED_EFFECT": [
+      4
+    ],
+    "LED_BRIGHTNESS": [
+      127
+    ],
+    "LED_GAMMIFY": [
+      1
+    ],
+    "LED_SPEED": [
+      8
+    ],
+    "LED_COLOR": [
+      8256
+    ],
+    "LED_DOA_COLOR": [
+      8256,
+      49254
+    ],
+    "DOA_VALUE": [
+      129,
+      1
+    ]
+  },
+  "firmware": [
+    2,
+    0,
+    6
+  ],
+  "build": "ua-io16-sqr",
+  "repo_hash": "4711e91ead2eaf956e1730a524ec8384e38569d3"
+}

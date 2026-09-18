@@ -4,7 +4,8 @@ testporcupine.py
 /.idea/*
 config/config.yaml
 # Python cache
-__pycache__/*.py[cod]
+__pycache__/
+*.py[cod]
 
 
 # Virtual environment
@@ -20,3 +21,4 @@ venv/
 .DS_Store
 Thumbs.db
 /debug_audio/
+xvf3800-tool/recordings/*
