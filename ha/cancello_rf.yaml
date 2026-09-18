@@ -1,0 +1,47 @@
+# Apertura remota cancelli via box ESP8266 + CC1101 (clone del
+# telecomando RF, codice fisso 433.92MHz). Il box espone:
+#   GET /open?name=cancellocasa
+#   GET /open?name=cancellostrada
+#   GET /learn   (solo log su Serial, non salva automaticamente)
+#   GET /status
+#
+# Questo file usa "packages" perché definisce entità su più
+# domini (input_text, rest_command, script) in un unico posto.
+# In configuration.yaml serve una sola volta:
+#
+#   homeassistant:
+#     packages:
+#       cancello_rf: !include ha/cancello_rf.yaml
+#
+# (coesiste senza conflitti con altri "packages:" o con le chiavi
+# a singolo dominio già in uso, es. timer: !include
+# ha/keyvoice_timer_helpers.yaml)
+#
+# Dopo la modifica: Impostazioni > Sistema > Riavvia.
+
+input_text:
+  cancello_esp_ip:
+    name: "IP box CC1101 cancelli"
+    initial: "192.168.1.49"
+
+rest_command:
+  cancello_casa_apri:
+    url: "http://{{ states('input_text.cancello_esp_ip') }}/open?name=cancellocasa"
+    method: GET
+    timeout: 5
+
+  cancello_strada_apri:
+    url: "http://{{ states('input_text.cancello_esp_ip') }}/open?name=cancellostrada"
+    method: GET
+    timeout: 5
+
+script:
+  apri_cancello_casa:
+    alias: "Cancello Casa"
+    sequence:
+      - service: rest_command.cancello_casa_apri
+
+  apri_cancello_strada:
+    alias: "Cancello Strada"
+    sequence:
+      - service: rest_command.cancello_strada_apri
