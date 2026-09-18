@@ -20,6 +20,7 @@ def invia_comando_ha(cmd, ha_url=None, ha_token=None):
         "Authorization": f"Bearer {ha_token}",
         "Content-Type": "application/json"
     }
+    print(f"[HA][DEBUG] azione={cmd['azione']!r} check={cmd['azione'] in ('accendi', 'spegni', 'apri', 'chiudi')} entity_id={cmd['entity_id']!r}")
     # Esempio: accendi/spegni switch/light, apri/chiudi cancelli (script)
     if cmd['azione'] in ('accendi', 'spegni', 'apri', 'chiudi') and cmd['entity_id']:
         domain = cmd['entity_id'].split('.')[0]
