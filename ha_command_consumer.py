@@ -12,15 +12,16 @@ def invia_comando_ha(cmd, ha_url=None, ha_token=None):
     Invia il comando a Home Assistant tramite REST API.
     """
     if ha_url is None or ha_token is None:
-        with open("config.json", "r", encoding="utf-8") as f:
+        with open("config/config.json", "r", encoding="utf-8") as f:
             CONFIG = json.load(f)
+        with open("config/secrets.json", "r", encoding="utf-8") as f:
+            SECRETS = json.load(f)
         ha_url = CONFIG['homeassistant']['url'].rstrip('/') + '/api/services'
-        ha_token = CONFIG['homeassistant']['token']
+        ha_token = SECRETS['homeassistant']['token']
     headers = {
         "Authorization": f"Bearer {ha_token}",
         "Content-Type": "application/json"
     }
-    print(f"[HA][DEBUG] azione={cmd['azione']!r} check={cmd['azione'] in ('accendi', 'spegni', 'apri', 'chiudi')} entity_id={cmd['entity_id']!r}")
     # Esempio: accendi/spegni switch/light, apri/chiudi cancelli (script)
     if cmd['azione'] in ('accendi', 'spegni', 'apri', 'chiudi') and cmd['entity_id']:
         domain = cmd['entity_id'].split('.')[0]

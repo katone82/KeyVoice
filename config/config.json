@@ -1,0 +1,66 @@
+{
+  "project_path": "/home/homeassistant/KeyVoice",
+  "venv_path": "/home/homeassistant/KeyVoice/keyvoiceenv",
+  "config_path": "/home/homeassistant/KeyVoice/config",
+  "service_user": "katone",
+  "debug_logging": false,
+  "openwakeword": {
+    "model": "hey_jarvis",
+    "agc_max_gain": 20,
+    "threshold_high": 0.35,
+    "threshold_low": 0.18,
+    "confirm_chunks": 3,
+    "pre_roll_seconds": 0.25,
+    "post_wake_ignore_seconds": 0.40,
+    "command_timeout_seconds": 4.0,
+    "max_command_seconds": 6.0,
+    "speech_start_ratio": 2.5,
+    "speech_end_ratio": 1.5,
+    "speech_start_time": 0.03,
+    "speech_end_time": 0.60,
+    "direction_angle_tolerance": 60.0,
+    "direction_lost_grace_seconds": 0.5,
+    "direction_min_dominance": 1.2,
+    "direction_min_energy": 1.0,
+    "direction_confirmations": 3,
+    "wake_direction_lookback_seconds": 1.0,
+    "agc_silence_floor": 15,
+    "wake_audio_channel": 1,
+    "wake_debug_audio_enabled": true,
+    "hw_speech_gate_enabled": true,
+    "post_command_strict_seconds": 2.0,
+    "beep_device": "plughw:3,0",
+    "beep_file": "./sounds/wake.wav",
+    "input_device_name": "reSpeaker XVF3800 4-Mic Array"
+  },
+  "vosk": {
+    "model_path": "/home/homeassistant/vosk-model/vosk-model-small-it-0.22",
+    "sample_rate": 16000
+  },
+  "command_feedback": {
+    "tts_engine": "piper",
+    "piper_model": "/home/homeassistant/KeyVoice/sounds/it_IT-paola-medium.onnx",
+    "piper_binary": "/home/homeassistant/KeyVoice/keyvoiceenv/bin/piper",
+    "piper_length_scale": 1.4
+  },
+  "homeassistant": {
+    "url": "http://localhost:8123",
+    "auto_update": true
+  },
+  "azioni": [
+    "accendi",
+    "spegni",
+    "apri",
+    "chiudi",
+    "inserisci",
+    "disinserisci",
+    "riproduce",
+    "metti",
+    "avvia",
+    "ferma",
+    "attiva",
+    "disattiva",
+    "accedi"
+  ],
+  "profile": "dev"
+}

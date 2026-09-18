@@ -2,7 +2,7 @@
 import json
 import os
 
-CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config.json')
+CONFIG_FILE = os.path.join(os.path.dirname(__file__), 'config', 'config.json')
 SERVICE_FILE = '/etc/systemd/system/keyvoice.service'
 
 # Chiavi richieste nel config

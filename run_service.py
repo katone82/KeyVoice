@@ -2,7 +2,6 @@ import json
 import threading
 import queue
 import time
-import requests
 import os
 import sys
 
@@ -14,12 +13,20 @@ from vosk_listener import vosk_listener
 from xvf3800_wakeword_listener import WakeWordListener, apply_config
 from fuzzy_parser import init_fuzzy, processa_comandi, command_queue, stop_event, timer_command_consumer, gestisci_timer_finito
 from timer_mqtt import avvia_listener_timer_mqtt
+from ha_command_consumer import ha_command_consumer
 
 # ==============================
 # CARICA CONFIGURAZIONE ESTERNA
 # ==============================
 with open("config/config.json", "r", encoding="utf-8") as f:
     CONFIG = json.load(f)
+
+# Segreti (token, password) tenuti fuori da config.json/git — vedi
+# config/secrets.json (non versionato, richiesto a parte).
+with open("config/secrets.json", "r", encoding="utf-8") as f:
+    SECRETS = json.load(f)
+
+CONFIG['homeassistant']['token'] = SECRETS['homeassistant']['token']
 
 sys.profile = CONFIG['profile']
 
@@ -108,42 +115,6 @@ def wakeword_thread():
         vosk_model=VOSK_MODEL
     )
     listener.run()
-
-def invia_comando_ha(cmd, ha_url, ha_token):
-    headers = {
-        "Authorization": f"Bearer {ha_token}",
-        "Content-Type": "application/json"
-    }
-    if cmd['azione'] in ('accendi', 'spegni', 'apri', 'chiudi') and cmd['entity_id']:
-        domain = cmd['entity_id'].split('.')[0]
-        service = 'turn_on' if cmd['azione'] in ('accendi', 'apri') else 'turn_off'
-        url = f"{ha_url}/{domain}/{service}"
-        data = {"entity_id": cmd['entity_id']}
-        try:
-            resp = requests.post(url, headers=headers, json=data, timeout=5)
-            if resp.ok:
-                print(f"[HA] Comando inviato: {cmd['azione']} {cmd['entity_id']} -> OK")
-                sound_feedback.play_command_ok()
-            else:
-                print(f"[HA] Errore risposta: {resp.status_code} {resp.text}")
-                sound_feedback.play_command_error()
-        except Exception as e:
-            print(f"[HA] Errore invio comando: {e}")
-            sound_feedback.play_command_error()
-    else:
-        print(f"[HA] Comando non gestito: {cmd}")
-        sound_feedback.play_command_error()
-
-def ha_command_consumer(ha_url, ha_token):
-    from fuzzy_parser import ha_command_queue, stop_event
-    import time
-    while not stop_event.is_set():
-        try:
-            cmd = ha_command_queue.get(timeout=1)
-        except queue.Empty:
-            continue
-        invia_comando_ha(cmd, ha_url, ha_token)
-        time.sleep(0.1)
 
 # ==============================
 # Avvio thread

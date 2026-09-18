@@ -1,8 +1,8 @@
-config.json
 keyvoiceenv/*
 testporcupine.py
 /.idea/*
 config/config.yaml
+config/secrets.json
 # Python cache
 __pycache__/
 *.py[cod]
