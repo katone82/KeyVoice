@@ -20,3 +20,4 @@ venv/
 .DS_Store
 Thumbs.db
 /debug_audio/
+xvf3800-tool/recordings/*
